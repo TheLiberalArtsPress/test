@@ -144,7 +144,7 @@
             // 直接寫入您最新部署的 Apps Script Web App 網址作為預設
             const [gasUrl, setGasUrl] = useState(() => {
                 const local = localStorage.getItem('stockwatch_gas_url');
-                return local !== null ? local : 'https://script.google.com/macros/s/AKfycbzS1Er4qgt71F7y52pfeSIJJ6NNghQ7zddwn7_zts-7ugx7AdO9cIb4_AKgOAoexNwt/exec';
+                return local !== null ? local : 'https://script.google.com/macros/s/AKfycbz450jFOGdkwzU7EQcMtvb_fWRAX5lJ3WU08ruz_kCIgR4IWKJDXrpbMoS0fHeh8uWC_A/exec';
             });
 
             const [cloudSyncEnabled, setCloudSyncEnabled] = useState(true);
@@ -599,13 +599,6 @@
                         </div>
                     </header>
 
-                    {/* 錯誤警告 Banner */}
-                    {loadError && (
-                        <div className="bg-red-500/20 text-red-500 text-center py-2 text-xs font-semibold border-b border-red-500/30">
-                            ⚠️ 雲端即時行情連線失敗，目前為離線備用狀態。請檢查您的 GAS 部署網址，並確保試算表中至少有一檔觀察股票。
-                        </div>
-                    )}
-
                     {/* === 2. 主版面區塊 === */}
                     <main className="flex flex-col lg:flex-row flex-1 min-h-0">
                         
@@ -714,10 +707,28 @@
 
                         {/* 右側詳細資料、K 線圖與筆記區域 */}
                         <section className="flex-1 bg-slate-50 dark:bg-slate-900/30 flex flex-col min-h-0 overflow-y-auto">
-                            {activeTab === "settings" ? (
+                            {activeTab === "settings" || loadError ? (
                                 
-                                /* === 3. Google Sheets 雲端設定面板 === */
-                                <div className="p-6 max-w-4xl mx-auto w-full">
+                                /* === 3. Google Sheets 雲端設定面板 & 診斷排障助手 === */
+                                <div className="p-6 max-w-4xl mx-auto w-full space-y-6">
+                                    
+                                    {loadError && (
+                                        <div className="bg-red-500/10 border-2 border-red-500/40 text-red-500 rounded-2xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                                            <div className="space-y-1">
+                                                <h4 className="font-bold text-sm">⚠️ 雲端即時行情連線中斷 / 失敗</h4>
+                                                <p className="text-xs opacity-90 leading-relaxed">
+                                                    網頁無法與您的 Google Apps Script 建立跨來源連線（CORS）。這通常與您的 **權限設定** 或 **試算表格式** 有關。
+                                                </p>
+                                            </div>
+                                            <button 
+                                                onClick={loadDataFromCloud}
+                                                className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-xs font-bold rounded-xl transition shrink-0 shadow-md"
+                                            >
+                                                點我重新連線
+                                            </button>
+                                        </div>
+                                    )}
+
                                     <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-6 md:p-8">
                                         <div className="flex items-center space-x-3 mb-6">
                                             <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-lg">
@@ -730,17 +741,47 @@
                                         </div>
 
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                            {/* 設定指南 */}
-                                            <div className="space-y-4">
-                                                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 border-l-4 border-indigo-500 pl-2">設定步驟</h3>
-                                                <ol className="list-decimal list-inside space-y-2 text-xs text-slate-600 dark:text-slate-400">
-                                                    <li>建立一個空白的 Google 試算表。</li>
-                                                    <li>在試算表第一行建立欄位：<span className="font-bold">代號, 名稱, 分類, 投資筆記</span>。</li>
-                                                    <li>開啟 擴充功能 &gt; Apps Script。</li>
-                                                    <li>貼上您的 Code.gs 並部署為「網頁應用程式」。</li>
-                                                    <li>將「誰能存取」設定為 「任何人」。</li>
-                                                    <li>將產生的執行 URL 網址填入右側欄位中即可！</li>
-                                                </ol>
+                                            {/* 診斷排障助手 */}
+                                            <div className="space-y-4 bg-indigo-50/50 dark:bg-indigo-950/20 p-5 rounded-2xl border border-indigo-100/50 dark:border-indigo-950/40">
+                                                <h3 className="text-sm font-bold text-indigo-600 dark:text-indigo-400 flex items-center space-x-1.5">
+                                                    <span>🔍</span>
+                                                    <span>連線診斷排障助手</span>
+                                                </h3>
+                                                
+                                                <div className="space-y-3.5 text-xs text-slate-600 dark:text-slate-400">
+                                                    <div className="p-3 bg-white dark:bg-slate-900 rounded-xl space-y-1">
+                                                        <span className="font-bold text-[11px] text-slate-400 block">第一步：網址格式驗證</span>
+                                                        {gasUrl && gasUrl.includes("/exec") ? (
+                                                            <span className="text-emerald-500 font-bold flex items-center">🟢 格式正確 (含有 /exec)</span>
+                                                        ) : (
+                                                            <span className="text-red-500 font-bold flex items-center">🔴 錯誤：您的網址不可包含 /dev，必須是 /exec！</span>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="p-3 bg-white dark:bg-slate-900 rounded-xl space-y-2">
+                                                        <span className="font-bold text-[11px] text-slate-400 block">第二步：直連授權測試</span>
+                                                        <p className="text-[11px] text-slate-500">請點選下方連結，在新分頁中直接開啟您的 API：</p>
+                                                        <a 
+                                                            href={gasUrl} 
+                                                            target="_blank" 
+                                                            rel="noopener noreferrer"
+                                                            className="inline-block px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 rounded-lg text-[11px] font-bold transition border border-indigo-200/50"
+                                                        >
+                                                            在新分頁打開 API 網址 🔗
+                                                        </a>
+                                                        <div className="text-[11px] text-slate-500 mt-2 space-y-1 leading-relaxed">
+                                                            <li><strong>顯示 JSON (如: `status: "success"`)</strong> 🟢 代表試算表與程式碼授權完全成功！</li>
+                                                            <li><strong>顯示 Google 登入畫面 / 提示權限不足</strong> 🔴 代表你在部署時，**「誰能存取」** 沒有設成 **「任何人 (Anyone)」**！請重新部署，並將權限改為「任何人」！</li>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="p-3 bg-white dark:bg-slate-900 rounded-xl space-y-1">
+                                                        <span className="font-bold text-[11px] text-slate-400 block">第三步：重新發布部署</span>
+                                                        <p className="text-[11px] text-slate-500 leading-relaxed">
+                                                            修改權限後，必須點選 **「部署」 &gt; 「管理部署」 &gt; 點擊鉛筆編輯 &gt; 版本選擇「新版本」** 並按下部署。每次修改程式碼，都必須選「新版本」才會有最新變更生效！
+                                                        </p>
+                                                    </div>
+                                                </div>
                                             </div>
 
                                             {/* 連線表單 */}
@@ -797,7 +838,10 @@
 
                                         <div className="mt-6 pt-6 border-t border-slate-200 dark:border-slate-700 text-right">
                                             <button 
-                                                onClick={() => setActiveTab("all")}
+                                                onClick={() => {
+                                                    setLoadError(false);
+                                                    setActiveTab("all");
+                                                }}
                                                 className="px-5 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-lg transition"
                                             >
                                                 返回看盤儀表板
