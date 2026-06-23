@@ -62,6 +62,17 @@
     <script type="text/babel" data-presets="custom-preset">
         const { useState, useEffect, useMemo, useRef } = React;
 
+        // === 數值格式化安全防禦輔助函數 ===
+        const safeToFixed = (val, decimals = 2) => {
+            if (val === null || val === undefined || isNaN(Number(val))) return "—";
+            return Number(val).toFixed(decimals);
+        };
+
+        const safePercent = (val, decimals = 2) => {
+            if (val === null || val === undefined || isNaN(Number(val))) return "—";
+            return (Number(val) * 100).toFixed(decimals) + "%";
+        };
+
         // === 內建 SVG 圖標組 ===
         const Icons = {
             TrendingUp: () => (
@@ -141,10 +152,10 @@
         function App() {
             const [theme, setTheme] = useState('dark');
             
-            // 直接寫入您最新部署的 Apps Script Web App 網址作為預設
+            // 已更新：將預設的 Apps Script Web App 網址替換為您提供的最新 exec 部署網址
             const [gasUrl, setGasUrl] = useState(() => {
                 const local = localStorage.getItem('stockwatch_gas_url');
-                return local !== null ? local : 'https://script.google.com/macros/s/AKfycbz450jFOGdkwzU7EQcMtvb_fWRAX5lJ3WU08ruz_kCIgR4IWKJDXrpbMoS0fHeh8uWC_A/exec';
+                return local !== null ? local : 'https://script.google.com/macros/s/AKfycbZi4EahiVJPIupIN-l3NfxOFN3QZ9zSwNcHMLq3ZY7r2-eEeUGJUmIhR9mxSPfaj27dw/exec';
             });
 
             const [cloudSyncEnabled, setCloudSyncEnabled] = useState(true);
@@ -176,7 +187,7 @@
             const [newNamePreview, setNewNamePreview] = useState("");
             const [addError, setAddError] = useState("");
 
-            // 大盤加權與櫃買即時報價（初始改為 null，避免卡在過時資料造成混淆）
+            // 大盤加權與櫃買即時報價
             const [indexQuotes, setIndexQuotes] = useState({
                 twii: { price: null, change: null, changePercent: null },
                 twoii: { price: null, change: null, changePercent: null }
@@ -213,13 +224,21 @@
                 }
             }, [gasUrl]);
 
-            // === 核心：從 Google Sheet API 即時抓取最新台股報價 ===
+            // === 核心：從 Google Sheet API 即時抓取最新台股報價 (加入防止瀏覽器快取設定) ===
             const loadDataFromCloud = () => {
                 if (!gasUrl) return;
                 setSyncLoading(true);
                 setLoadError(false);
                 
-                fetch(gasUrl, { method: "GET", mode: "cors" })
+                // 增加時戳，防堵瀏覽器與服務端 CORS 快取問題
+                const cacheBuster = `_t=${Date.now()}`;
+                const finalUrl = gasUrl.includes('?') ? `${gasUrl}&${cacheBuster}` : `${gasUrl}?${cacheBuster}`;
+
+                fetch(finalUrl, { 
+                    method: "GET", 
+                    mode: "cors",
+                    cache: "no-store" 
+                })
                     .then(response => {
                         if (response.ok) {
                             return response.json();
@@ -249,7 +268,7 @@
                             setFlashStates(nextFlash);
                             setWatchlist(data.watchlist);
                             
-                            if (data.indices && data.indices.twii && data.indices.twii.price) {
+                            if (data.indices && data.indices.twii && data.indices.twii.price !== null) {
                                 setIndexQuotes(data.indices);
                             }
                             
@@ -301,7 +320,7 @@
                 }
             }, [newSymbol]);
 
-            // === 歷史 K 線渲染：對接 GAS 的真實 Yahoo 歷史 Chart 歷史資料 ===
+            // === 歷史 K 線渲染：對接 GAS 的真實 Yahoo 歷史 Chart 歷史資料 (加入防快取時戳) ===
             useEffect(() => {
                 if (!chartContainerRef.current || !selectedSymbol) return;
 
@@ -333,8 +352,13 @@
                 setChartLoading(true);
                 const apiRange = klineRange.toLowerCase(); // '1m', '3m', '6m'
 
-                // 向 GAS 請求真實 Yahoo OHLCV 資料
-                fetch(`${gasUrl}?action=getChart&symbol=${selectedSymbol}&range=${apiRange}`)
+                // 增加快取時戳以向 GAS 請求真實 Yahoo OHLCV 資料
+                const cacheBuster = `_t=${Date.now()}`;
+                const finalChartUrl = gasUrl.includes('?') 
+                    ? `${gasUrl}&action=getChart&symbol=${selectedSymbol}&range=${apiRange}&${cacheBuster}`
+                    : `${gasUrl}?action=getChart&symbol=${selectedSymbol}&range=${apiRange}&${cacheBuster}`;
+
+                fetch(finalChartUrl, { cache: "no-store" })
                     .then(res => res.json())
                     .then(data => {
                         if (data && data.candles && data.candles.length > 0) {
@@ -397,8 +421,8 @@
                 })
                 .then(() => {
                     triggerToast("☁️ 資料已成功即時同步至雲端試算表");
-                    // 同步完畢後，1秒後自動重新拉取以確保取得最新注入的 Yahoo 資訊
-                    setTimeout(loadDataFromCloud, 1000);
+                    // 同步完畢後，1.5秒後自動重新拉取以確保取得最新注入的 Yahoo 資訊
+                    setTimeout(loadDataFromCloud, 1500);
                 })
                 .catch(e => {
                     console.error("雲端同步錯誤", e);
@@ -496,7 +520,15 @@
                     return;
                 }
                 setSyncLoading(true);
-                fetch(gasUrl, { method: "GET", mode: "cors" })
+                
+                const cacheBuster = `_t=${Date.now()}`;
+                const finalUrl = gasUrl.includes('?') ? `${gasUrl}&${cacheBuster}` : `${gasUrl}?${cacheBuster}`;
+
+                fetch(finalUrl, { 
+                    method: "GET", 
+                    mode: "cors",
+                    cache: "no-store"
+                })
                     .then(response => {
                         if (response.ok) {
                             return response.json();
@@ -512,7 +544,6 @@
                         }
                     })
                     .catch(() => {
-                        // 回降容錯
                         triggerToast("☁️ 正在連線至雲端試算表 API...");
                         loadDataFromCloud();
                     })
@@ -546,9 +577,9 @@
                                 <span className="font-bold text-sm text-slate-800 dark:text-slate-100">
                                     {indexQuotes.twii.price ? indexQuotes.twii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
                                 </span>
-                                {indexQuotes.twii.price && (
+                                {indexQuotes.twii.price !== null && indexQuotes.twii.price !== undefined && indexQuotes.twii.change !== null && indexQuotes.twii.change !== undefined && (
                                     <span className={`text-xs font-bold flex items-center ${indexQuotes.twii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                        {indexQuotes.twii.change >= 0 ? '▲' : '▼'}{Math.abs(indexQuotes.twii.change).toFixed(2)} ({(indexQuotes.twii.changePercent * 100).toFixed(2)}%)
+                                        {indexQuotes.twii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twii.change))} ({safePercent(indexQuotes.twii.changePercent)})
                                     </span>
                                 )}
                             </div>
@@ -558,9 +589,9 @@
                                 <span className="font-bold text-sm text-slate-800 dark:text-slate-100">
                                     {indexQuotes.twoii.price ? indexQuotes.twoii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
                                 </span>
-                                {indexQuotes.twoii.price && (
+                                {indexQuotes.twoii.price !== null && indexQuotes.twoii.price !== undefined && indexQuotes.twoii.change !== null && indexQuotes.twoii.change !== undefined && (
                                     <span className={`text-xs font-bold flex items-center ${indexQuotes.twoii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                        {indexQuotes.twoii.change >= 0 ? '▲' : '▼'}{Math.abs(indexQuotes.twoii.change).toFixed(2)} ({(indexQuotes.twoii.changePercent * 100).toFixed(2)}%)
+                                        {indexQuotes.twoii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twoii.change))} ({safePercent(indexQuotes.twoii.changePercent)})
                                     </span>
                                 )}
                             </div>
@@ -677,12 +708,12 @@
                                                 <div className="flex items-center space-x-4">
                                                     <div className="text-right">
                                                         <div className="text-sm font-extrabold font-mono text-slate-800 dark:text-white">
-                                                            {q.price ? q.price.toFixed(2) : "—"}
+                                                            {safeToFixed(q.price)}
                                                         </div>
-                                                        {q.price ? (
+                                                        {q.price !== null && q.price !== undefined && q.change !== null && q.change !== undefined ? (
                                                             <div className={`text-xs font-bold flex items-center justify-end space-x-1 ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                <span>{q.change >= 0 ? '+' : ''}{q.change.toFixed(2)}</span>
-                                                                <span className="text-[10px]">({(q.changePercent * 100).toFixed(2)}%)</span>
+                                                                <span>{q.change >= 0 ? '+' : ''}{safeToFixed(q.change)}</span>
+                                                                <span className="text-[10px]">({safePercent(q.changePercent)})</span>
                                                             </div>
                                                         ) : (
                                                             <div className="text-[10px] text-slate-400">載入中...</div>
@@ -878,13 +909,13 @@
                                                     {/* 中間：最新成交價格 */}
                                                     <div className="flex items-baseline space-x-4">
                                                         <div className="text-3xl font-black font-mono tracking-tight text-slate-800 dark:text-white">
-                                                            {selectedQuote && selectedQuote.price ? selectedQuote.price.toFixed(2) : "—"}
+                                                            {safeToFixed(selectedQuote?.price)}
                                                         </div>
-                                                        {selectedQuote && selectedQuote.price && (
-                                                            <div className={`text-base font-bold flex items-center ${selectedQuote.change >= 0 ? 'text-upRed animate-pulse' : 'text-downGreen'}`}>
+                                                        {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined && (
+                                                            <div className={`text-base font-bold flex items-center ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
                                                                 <span className="mr-1">{selectedQuote.change >= 0 ? '▲' : '▼'}</span>
-                                                                <span>{Math.abs(selectedQuote.change).toFixed(2)}</span>
-                                                                <span className="ml-1.5">({(selectedQuote.changePercent * 100).toFixed(2)}%)</span>
+                                                                <span>{safeToFixed(Math.abs(selectedQuote.change))}</span>
+                                                                <span className="ml-1.5">({safePercent(selectedQuote.changePercent)})</span>
                                                             </div>
                                                         )}
                                                     </div>
@@ -904,31 +935,36 @@
                                                     <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
                                                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">開盤價</p>
                                                         <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.open ? selectedQuote.open.toFixed(2) : "—"}
+                                                            {safeToFixed(selectedQuote?.open)}
                                                         </p>
                                                     </div>
                                                     <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
                                                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最高價</p>
                                                         <p className="text-sm font-extrabold text-upRed mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.high ? selectedQuote.high.toFixed(2) : "—"}
+                                                            {safeToFixed(selectedQuote?.high)}
                                                         </p>
                                                     </div>
                                                     <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
                                                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最低價</p>
                                                         <p className="text-sm font-extrabold text-downGreen mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.low ? selectedQuote.low.toFixed(2) : "—"}
+                                                            {safeToFixed(selectedQuote?.low)}
                                                         </p>
                                                     </div>
                                                     <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
                                                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">昨收價</p>
                                                         <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.price ? (selectedQuote.price - selectedQuote.change).toFixed(2) : "—"}
+                                                            {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined
+                                                                ? safeToFixed(selectedQuote.price - selectedQuote.change) 
+                                                                : "—"}
                                                         </p>
                                                     </div>
                                                     <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800 col-span-2 md:col-span-1">
                                                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">今日成交量</p>
                                                         <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.volume ? (selectedQuote.volume).toLocaleString() : "—"} <span className="text-[10px] text-slate-400">股</span>
+                                                            {selectedQuote && selectedQuote.volume !== null && selectedQuote.volume !== undefined 
+                                                                ? Number(selectedQuote.volume).toLocaleString() 
+                                                                : "—"}{" "}
+                                                            <span className="text-[10px] text-slate-400">股</span>
                                                         </p>
                                                     </div>
                                                 </div>
