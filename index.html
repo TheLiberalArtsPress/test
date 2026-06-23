@@ -786,44 +786,7 @@
                             </div>
                         </div>
 
-                        {/* 即時大盤與台指期 */}
-                        <div className="hidden md:flex items-center space-x-6 px-4 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-xl max-w-2xl overflow-x-auto no-scrollbar">
-                            <div className="flex items-center space-x-2 shrink-0">
-                                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">加權指數:</span>
-                                <span className="font-bold text-sm text-slate-800 dark:text-slate-100">
-                                    {indexQuotes.twii.price ? indexQuotes.twii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
-                                </span>
-                                {indexQuotes.twii.price !== null && indexQuotes.twii.price !== undefined && indexQuotes.twii.change !== null && indexQuotes.twii.change !== undefined && (
-                                    <span className={`text-xs font-bold flex items-center ${indexQuotes.twii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                        {indexQuotes.twii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twii.change))} ({safePercent(indexQuotes.twii.changePercent)})
-                                    </span>
-                                )}
-                            </div>
-                            <div className="w-[1px] h-4 bg-slate-300 dark:bg-slate-700 shrink-0"></div>
-                            <div className="flex items-center space-x-2 shrink-0">
-                                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">櫃買指數:</span>
-                                <span className="font-bold text-sm text-slate-800 dark:text-slate-100">
-                                    {indexQuotes.twoii.price ? indexQuotes.twoii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
-                                </span>
-                                {indexQuotes.twoii.price !== null && indexQuotes.twoii.price !== undefined && indexQuotes.twoii.change !== null && indexQuotes.twoii.change !== undefined && (
-                                    <span className={`text-xs font-bold flex items-center ${indexQuotes.twoii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                        {indexQuotes.twoii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twoii.change))} ({safePercent(indexQuotes.twoii.changePercent)})
-                                    </span>
-                                )}
-                            </div>
-                            <div className="w-[1px] h-4 bg-slate-300 dark:bg-slate-700 shrink-0"></div>
-                            <div className="flex items-center space-x-2 shrink-0">
-                                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">台指期貨:</span>
-                                <span className="font-bold text-sm text-slate-800 dark:text-slate-100">
-                                    {indexQuotes.wtx && indexQuotes.wtx.price ? indexQuotes.wtx.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
-                                </span>
-                                {indexQuotes.wtx && indexQuotes.wtx.price !== null && indexQuotes.wtx.price !== undefined && indexQuotes.wtx.change !== null && indexQuotes.wtx.change !== undefined && (
-                                    <span className={`text-xs font-bold flex items-center ${indexQuotes.wtx.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                        {indexQuotes.wtx.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.wtx.change))} ({safePercent(indexQuotes.wtx.changePercent)})
-                                    </span>
-                                )}
-                            </div>
-                        </div>
+
 
                         <div className="flex items-center space-x-3">
                             <button 
@@ -857,6 +820,45 @@
                             </button>
                         </div>
                     </header>
+
+                    {/* === 1.5 指數行情即時列 === */}
+                    <div className="flex items-center justify-start md:justify-center space-x-4 md:space-x-8 px-6 py-2.5 bg-slate-100 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-xs shrink-0 overflow-x-auto no-scrollbar">
+                        <div className="flex items-center space-x-2 shrink-0">
+                            <span className="font-bold text-slate-500 dark:text-slate-400">加權指數:</span>
+                            <span className="font-black text-slate-800 dark:text-slate-100 font-mono">
+                                {indexQuotes.twii.price ? indexQuotes.twii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
+                            </span>
+                            {indexQuotes.twii.price !== null && indexQuotes.twii.price !== undefined && indexQuotes.twii.change !== null && indexQuotes.twii.change !== undefined && (
+                                <span className={`font-bold flex items-center font-mono ${indexQuotes.twii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                    {indexQuotes.twii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twii.change))} ({safePercent(indexQuotes.twii.changePercent)})
+                                </span>
+                            )}
+                        </div>
+                        <div className="w-[1px] h-3 bg-slate-300 dark:bg-slate-700 shrink-0"></div>
+                        <div className="flex items-center space-x-2 shrink-0">
+                            <span className="font-bold text-slate-500 dark:text-slate-400">櫃買指數:</span>
+                            <span className="font-black text-slate-800 dark:text-slate-100 font-mono">
+                                {indexQuotes.twoii.price ? indexQuotes.twoii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
+                            </span>
+                            {indexQuotes.twoii.price !== null && indexQuotes.twoii.price !== undefined && indexQuotes.twoii.change !== null && indexQuotes.twoii.change !== undefined && (
+                                <span className={`font-bold flex items-center font-mono ${indexQuotes.twoii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                    {indexQuotes.twoii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twoii.change))} ({safePercent(indexQuotes.twoii.changePercent)})
+                                </span>
+                            )}
+                        </div>
+                        <div className="w-[1px] h-3 bg-slate-300 dark:bg-slate-700 shrink-0"></div>
+                        <div className="flex items-center space-x-2 shrink-0">
+                            <span className="font-bold text-slate-500 dark:text-slate-400">台指電子盤:</span>
+                            <span className="font-black text-slate-800 dark:text-slate-100 font-mono">
+                                {indexQuotes.wtx && indexQuotes.wtx.price ? indexQuotes.wtx.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
+                            </span>
+                            {indexQuotes.wtx && indexQuotes.wtx.price !== null && indexQuotes.wtx.price !== undefined && indexQuotes.wtx.change !== null && indexQuotes.wtx.change !== undefined && (
+                                <span className={`font-bold flex items-center font-mono ${indexQuotes.wtx.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                    {indexQuotes.wtx.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.wtx.change))} ({safePercent(indexQuotes.wtx.changePercent)})
+                                </span>
+                            )}
+                        </div>
+                    </div>
 
                     {/* === 2. 主版面區塊 === */}
                     <main className="flex flex-col lg:flex-row flex-1 min-h-0">
@@ -1459,7 +1461,7 @@
             "00878": { name: "國泰永續高股息", price: 22.90, category: "etf" },
             "00919": { name: "群益台灣精選高息", price: 25.10, category: "etf" },
             "00940": { name: "元大台灣價值高息", price: 9.65, category: "etf" },
-            "WTX&": { name: "台指期近月", price: 46301, category: "stock" },
+            "WTX&": { name: "台指期近月", price: 47000, category: "stock" },
             "TSM": { name: "台積電 ADR", price: 172.5, category: "us" },
             "NVDA": { name: "輝達", price: 127.4, category: "us" },
             "AAPL": { name: "蘋果", price: 214.3, category: "us" },
