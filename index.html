@@ -73,6 +73,38 @@
             return (Number(val) * 100).toFixed(decimals) + "%";
         };
 
+        const getTaiwanTimeParts = (unixTimestamp) => {
+            const tzOffset = 8 * 60 * 60 * 1000;
+            const date = new Date(unixTimestamp * 1000 + tzOffset);
+            return {
+                hour: date.getUTCHours(),
+                minute: date.getUTCMinutes()
+            };
+        };
+
+        const formatVolume = (vol, isFutures) => {
+            if (vol === null || vol === undefined || isNaN(Number(vol))) return "—";
+            const num = Number(vol);
+            if (isFutures) {
+                if (num >= 10000) {
+                    return (num / 10000).toFixed(3) + " 萬口";
+                }
+                return num.toLocaleString() + " 口";
+            } else {
+                if (num >= 1000000) {
+                    return (num / 1000).toFixed(0) + " 張";
+                }
+                return num.toLocaleString() + " 股";
+            }
+        };
+
+        const getDecimals = (sym) => {
+            if (sym === "WTX&") return 0;
+            if (sym === "^TWII") return 2;
+            if (sym === "^TWOII") return 2;
+            return 2;
+        };
+
         // === 內建 SVG 圖標組 ===
         const Icons = {
             TrendingUp: () => (
@@ -149,6 +181,32 @@
             return data;
         }
 
+        function generateIntradayData(symbol, basePrice) {
+            const seed = symbol.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+            let currentPrice = basePrice || 100;
+            const data = [];
+            const count = 300;
+            const now = Math.floor(Date.now() / 1000);
+            for (let i = count; i >= 0; i--) {
+                const time = now - i * 60 * 5; // 5 minutes interval
+                const changePercent = (Math.sin(seed + i * 0.05) * 0.002) + ((Math.random() - 0.5) * 0.003);
+                const open = currentPrice;
+                const close = currentPrice * (1 + changePercent);
+                const high = Math.max(open, close) * (1 + Math.random() * 0.001);
+                const low = Math.min(open, close) * (1 - Math.random() * 0.001);
+                data.push({
+                    time: time,
+                    value: parseFloat(close.toFixed(2)),
+                    open: parseFloat(open.toFixed(2)),
+                    high: parseFloat(high.toFixed(2)),
+                    low: parseFloat(low.toFixed(2)),
+                    close: parseFloat(close.toFixed(2))
+                });
+                currentPrice = close;
+            }
+            return data;
+        }
+
         function App() {
             const [theme, setTheme] = useState('dark');
             
@@ -172,22 +230,28 @@
             const [chartLoading, setChartLoading] = useState(false);
             const [loadError, setLoadError] = useState(false); // 錯誤提示狀態
             
-            // 觀察清單狀態 (預設提供台股核心熱門股，雲端連通後會被雲端資料覆蓋)
+            // 觀察清單狀態 (預設提供台股與美股熱門/ADR股，雲端連通後會被雲端資料覆蓋)
             const [watchlist, setWatchlist] = useState(() => {
-                const local = localStorage.getItem('stockwatch_list');
+                const local = localStorage.getItem('stockwatch_list_v3');
                 if (local) return JSON.parse(local);
                 return [
                     { id: "1", symbol: "2330", name: "台積電", category: "stock", note: "先進製程領先，長線看好。", quote: {} },
                     { id: "2", symbol: "2317", name: "鴻海", category: "stock", note: "AI 伺服器主要受益者。", quote: {} },
                     { id: "3", symbol: "0050", name: "元大台灣50", category: "etf", note: "台股大盤代表，適合定期定額。", quote: {} },
                     { id: "4", symbol: "00878", name: "國泰永續高股息", category: "etf", note: "季配息，波動度穩健。", quote: {} },
-                    { id: "5", symbol: "WTX&", name: "台指期近月", category: "stock", note: "大盤期貨（含夜盤與即時行情）。", quote: {} }
+                    { id: "5", symbol: "WTX&", name: "台指期近月", category: "stock", note: "大盤期貨（含夜盤與即時行情）。", quote: {} },
+                    { id: "6", symbol: "TSM", name: "台積電 ADR", category: "us", note: "TSMC 美股存託憑證。", quote: {} },
+                    { id: "7", symbol: "NVDA", name: "輝達", category: "us", note: "全球 AI 晶片龍頭。", quote: {} },
+                    { id: "8", symbol: "AAPL", name: "蘋果", category: "us", note: "消費性電子與軟體生態系巨擘。", quote: {} },
+                    { id: "9", symbol: "QQQ", name: "納斯達克 100 ETF", category: "us", note: "追蹤納斯達克 100 指數之 ETF。", quote: {} }
                 ];
             });
 
             const [selectedSymbol, setSelectedSymbol] = useState("2330");
-            const [activeTab, setActiveTab] = useState("all"); // all, stock, etf, settings
+            const [activeTab, setActiveTab] = useState("all"); // all, stock, etf, us, settings
             const [searchQuery, setSearchQuery] = useState("");
+            const [chartType, setChartType] = useState("trend"); // trend, kline
+            const [futuresSession, setFuturesSession] = useState("night"); // day, night
             
             // 新增自選視窗狀態
             const [showAddModal, setShowAddModal] = useState(false);
@@ -221,7 +285,7 @@
 
             // 儲存設定至 LocalStorage
             useEffect(() => {
-                localStorage.setItem('stockwatch_list', JSON.stringify(watchlist));
+                localStorage.setItem('stockwatch_list_v3', JSON.stringify(watchlist));
             }, [watchlist]);
 
             useEffect(() => {
@@ -322,16 +386,17 @@
 
             // 監聽新增代號之自動辨識
             useEffect(() => {
-                const s = newSymbol.trim();
-                if (s.length >= 4) {
+                const s = newSymbol.trim().toUpperCase();
+                if (s.length > 0) {
                     if (MOCK_STOCK_REGISTRY[s]) {
                         setNewNamePreview(MOCK_STOCK_REGISTRY[s].name);
                         setNewCategory(MOCK_STOCK_REGISTRY[s].category);
                         setAddError("");
                     } else {
+                        const isUs = /^[A-Z&^]+$/.test(s);
                         const isEtf = s.length >= 5 && /^00\d+$/.test(s);
                         setNewNamePreview(`代號 (${s})`);
-                        setNewCategory(isEtf ? 'etf' : 'stock');
+                        setNewCategory(isUs ? 'us' : (isEtf ? 'etf' : 'stock'));
                         setAddError("");
                     }
                 } else {
@@ -357,20 +422,43 @@
                         horzLines: { color: isDark ? 'rgba(148, 163, 184, 0.1)' : 'rgba(71, 85, 105, 0.05)' },
                     },
                     rightPriceScale: { borderColor: isDark ? '#475569' : '#cbd5e1' },
-                    timeScale: { borderColor: isDark ? '#475569' : '#cbd5e1' },
+                    timeScale: {
+                        borderColor: isDark ? '#475569' : '#cbd5e1',
+                        timeVisible: chartType === "trend",
+                        secondsVisible: false,
+                    },
                 });
 
-                const series = chart.addCandlestickSeries({
-                    upColor: '#ef4444',
-                    downColor: '#22c55e',
-                    borderUpColor: '#ef4444',
-                    borderDownColor: '#22c55e',
-                    wickUpColor: '#ef4444',
-                    wickDownColor: '#22c55e',
-                });
+                let series;
+                if (chartType === "trend") {
+                    const activeQuote = selectedSymbol === "^TWII" ? indexQuotes.twii 
+                                      : selectedSymbol === "^TWOII" ? indexQuotes.twoii 
+                                      : selectedSymbol === "WTX&" ? indexQuotes.wtx 
+                                      : (watchlist.find(x => x.symbol === selectedSymbol)?.quote || {});
+                    const isUp = activeQuote.change >= 0;
+                    const lineColor = isUp ? '#ef4444' : '#22c55e';
+                    const topColor = isUp ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.3)';
+                    const bottomColor = isUp ? 'rgba(239, 68, 68, 0.0)' : 'rgba(34, 197, 94, 0.0)';
+
+                    series = chart.addAreaSeries({
+                        lineColor: lineColor,
+                        topColor: topColor,
+                        bottomColor: bottomColor,
+                        lineWidth: 2,
+                    });
+                } else {
+                    series = chart.addCandlestickSeries({
+                        upColor: '#ef4444',
+                        downColor: '#22c55e',
+                        borderUpColor: '#ef4444',
+                        borderDownColor: '#22c55e',
+                        wickUpColor: '#ef4444',
+                        wickDownColor: '#22c55e',
+                    });
+                }
 
                 setChartLoading(true);
-                const apiRange = klineRange.toLowerCase(); // '1m', '3m', '6m'
+                const apiRange = chartType === "trend" ? "1d" : klineRange.toLowerCase();
 
                 // 增加快取時戳以向 GAS 請求真實 Yahoo OHLCV 資料
                 const cacheBuster = `_t=${Date.now()}`;
@@ -382,18 +470,58 @@
                     .then(res => res.json())
                     .then(data => {
                         if (data && data.candles && data.candles.length > 0) {
-                            series.setData(data.candles);
+                            let chartData = data.candles;
+                            
+                            // Filter day/night session if symbol is WTX& and chartType is trend
+                            if (selectedSymbol === "WTX&" && chartType === "trend") {
+                                chartData = chartData.filter(candle => {
+                                    const { hour, minute } = getTaiwanTimeParts(candle.time);
+                                    const timeVal = hour * 100 + minute;
+                                    if (futuresSession === "day") {
+                                        return timeVal >= 845 && timeVal <= 1345;
+                                    } else {
+                                        return timeVal >= 1500 || timeVal <= 500;
+                                    }
+                                });
+                            }
+                            
+                            if (chartType === "trend") {
+                                const areaData = chartData.map(c => ({
+                                    time: c.time,
+                                    value: c.value !== undefined ? c.value : c.close
+                                }));
+                                series.setData(areaData);
+                            } else {
+                                series.setData(chartData);
+                            }
                             chart.timeScale().fitContent();
                         } else {
                             throw new Error("K線資料格式不符");
                         }
                     })
                     .catch(err => {
-                        console.warn("無法取得真實 K 線，啟用高擬真備用走勢", err);
+                        console.warn("無法取得真實行情，啟用高擬真備用走勢", err);
                         // Fallback 至高擬真模擬資料，確保元件不崩潰
                         const basePrice = MOCK_STOCK_REGISTRY[selectedSymbol]?.price || 150;
-                        const mockCandles = generateHistoricalData(selectedSymbol, basePrice);
-                        series.setData(mockCandles);
+                        if (chartType === "trend") {
+                            let mockData = generateIntradayData(selectedSymbol, basePrice);
+                            if (selectedSymbol === "WTX&") {
+                                mockData = mockData.filter(candle => {
+                                    const { hour, minute } = getTaiwanTimeParts(candle.time);
+                                    const timeVal = hour * 100 + minute;
+                                    if (futuresSession === "day") {
+                                        return timeVal >= 845 && timeVal <= 1345;
+                                    } else {
+                                        return timeVal >= 1500 || timeVal <= 500;
+                                    }
+                                });
+                            }
+                            const areaData = mockData.map(c => ({ time: c.time, value: c.value }));
+                            series.setData(areaData);
+                        } else {
+                            const mockCandles = generateHistoricalData(selectedSymbol, basePrice);
+                            series.setData(mockCandles);
+                        }
                         chart.timeScale().fitContent();
                     })
                     .finally(() => {
@@ -416,7 +544,7 @@
                     chartInstanceRef.current = null;
                     candlestickSeriesRef.current = null;
                 };
-            }, [selectedSymbol, theme, klineRange, gasUrl]);
+            }, [selectedSymbol, theme, klineRange, gasUrl, chartType, futuresSession]);
 
             // 切換深色模式
             const toggleTheme = () => {
@@ -525,10 +653,11 @@
             // 搜尋過濾
             const filteredWatchlist = useMemo(() => {
                 return watchlist.filter(item => {
-                    const matchesSearch = item.symbol.includes(searchQuery) || item.name.includes(searchQuery);
+                    const matchesSearch = item.symbol.toUpperCase().includes(searchQuery.toUpperCase()) || item.name.includes(searchQuery);
                     if (!matchesSearch) return false;
                     if (activeTab === "stock") return item.category === "stock";
                     if (activeTab === "etf") return item.category === "etf";
+                    if (activeTab === "us") return item.category === "us";
                     return true;
                 });
             }, [watchlist, searchQuery, activeTab]);
@@ -572,8 +701,26 @@
                     });
             };
 
-            const activeStockInfo = watchlist.find(item => item.symbol === selectedSymbol);
-            const selectedQuote = activeStockInfo ? activeStockInfo.quote : null;
+            const activeStockInfo = useMemo(() => {
+                if (selectedSymbol === "^TWII") {
+                    return { symbol: "^TWII", name: "加權指數", category: "index", quote: indexQuotes.twii };
+                }
+                if (selectedSymbol === "^TWOII") {
+                    return { symbol: "^TWOII", name: "櫃買指數", category: "index", quote: indexQuotes.twoii };
+                }
+                if (selectedSymbol === "WTX&") {
+                    return { symbol: "WTX&", name: "台指電子盤", category: "index", quote: indexQuotes.wtx };
+                }
+                return watchlist.find(item => item.symbol === selectedSymbol);
+            }, [selectedSymbol, watchlist, indexQuotes]);
+
+            const selectedQuote = useMemo(() => {
+                if (!activeStockInfo) return null;
+                if (selectedSymbol === "^TWII") return indexQuotes.twii;
+                if (selectedSymbol === "^TWOII") return indexQuotes.twoii;
+                if (selectedSymbol === "WTX&") return indexQuotes.wtx;
+                return activeStockInfo.quote;
+            }, [activeStockInfo, selectedSymbol, indexQuotes]);
 
             return (
                 <div className="flex flex-col h-screen min-h-0 bg-slate-50 dark:bg-darkBg overflow-hidden">
@@ -703,6 +850,12 @@
                                 >
                                     ETF ({watchlist.filter(x => x.category === "etf").length})
                                 </button>
+                                <button 
+                                    onClick={() => setActiveTab("us")}
+                                    className={`flex-1 py-2 text-xs font-semibold rounded-md transition ${activeTab === "us" ? "bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm" : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100"}`}
+                                >
+                                    美股 & ADR ({watchlist.filter(x => x.category === "us").length})
+                                </button>
                             </div>
 
                             {/* 自選清單列表 */}
@@ -729,8 +882,14 @@
                                                     <div>
                                                         <div className="flex items-center space-x-1.5">
                                                             <span className="font-bold text-sm tracking-wide text-slate-800 dark:text-white">{item.symbol}</span>
-                                                            <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${item.category === "etf" ? "bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300" : "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-400"}`}>
-                                                                {item.category === "etf" ? "ETF" : "個股"}
+                                                            <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${
+                                                                item.category === "etf" 
+                                                                    ? "bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300" 
+                                                                    : item.category === "us"
+                                                                        ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400"
+                                                                        : "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-400"
+                                                            }`}>
+                                                                {item.category === "etf" ? "ETF" : item.category === "us" ? "美股" : "個股"}
                                                             </span>
                                                         </div>
                                                         <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5 max-w-[150px]">{item.name}</div>
@@ -918,135 +1077,219 @@
                                 <div className="p-4 md:p-6 space-y-6">
                                     {selectedSymbol && activeStockInfo ? (
                                         <>
-                                            {/* 即時報價卡片與主數據 */}
-                                            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
-                                                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                            {/* 全域顯示三格指數大字格卡 */}
+                                            {renderIndexCards()}
+
+                                            {/* 即時報價卡片與主數據 (僅在非加權/櫃買/台指期時顯示，即個股/ETF) */}
+                                            {!(selectedSymbol === "^TWII" || selectedSymbol === "^TWOII" || selectedSymbol === "WTX&") && (
+                                                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
+                                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                                        
+                                                        {/* 左側：代號名稱 */}
+                                                        <div className="flex items-center space-x-3">
+                                                            <div className="h-12 w-12 bg-indigo-50 dark:bg-slate-700 rounded-xl flex items-center justify-center font-black text-indigo-600 dark:text-indigo-400">
+                                                                {selectedSymbol.substring(0,2)}
+                                                            </div>
+                                                            <div>
+                                                                <div className="flex items-center space-x-2">
+                                                                    <h2 className="text-xl font-black text-slate-800 dark:text-white">{selectedSymbol}</h2>
+                                                                    <span className={`px-2 py-0.5 text-xs font-bold rounded-md ${
+                                                                        activeStockInfo.category === "etf" 
+                                                                            ? "bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-300" 
+                                                                            : activeStockInfo.category === "us"
+                                                                                ? "bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-300"
+                                                                                : "bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-300"
+                                                                    }`}>
+                                                                        {activeStockInfo.category === "etf" ? "ETF 基金" : activeStockInfo.category === "us" ? "美股 ADR" : "上市櫃股票"}
+                                                                    </span>
+                                                                </div>
+                                                                <p className="text-sm font-semibold text-slate-500 dark:text-slate-400 mt-0.5">{activeStockInfo.name}</p>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* 中間：最新成交價格 */}
+                                                        <div className="flex items-baseline space-x-4">
+                                                            <div className="text-3xl font-black font-mono tracking-tight text-slate-800 dark:text-white">
+                                                                {safeToFixed(selectedQuote?.price)}
+                                                            </div>
+                                                            {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined && (
+                                                                <div className={`text-base font-bold flex items-center ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                                    <span className="mr-1">{selectedQuote.change >= 0 ? '▲' : '▼'}</span>
+                                                                    <span>{safeToFixed(Math.abs(selectedQuote.change))}</span>
+                                                                    <span className="ml-1.5">({safePercent(selectedQuote.changePercent)})</span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        {/* 右側：雲端即時行情指示器 */}
+                                                        <div className="text-xs text-right text-slate-400 dark:text-slate-500">
+                                                            <div className="flex items-center justify-end space-x-1">
+                                                                <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
+                                                                <span className="font-semibold text-slate-600 dark:text-slate-300">Yahoo 實時行情連線</span>
+                                                            </div>
+                                                            <p className="mt-1">每 30 秒自動靜默刷新，或手動強制刷新</p>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* 台灣傳統看盤細部五檔精華區塊 */}
+                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-6 pt-6 border-t border-slate-100 dark:border-slate-700/60">
+                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
+                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">開盤價</p>
+                                                            <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
+                                                                {safeToFixed(selectedQuote?.open)}
+                                                            </p>
+                                                        </div>
+                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
+                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最高價</p>
+                                                            <p className="text-sm font-extrabold text-upRed mt-1 font-mono">
+                                                                {safeToFixed(selectedQuote?.high)}
+                                                            </p>
+                                                        </div>
+                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
+                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最低價</p>
+                                                            <p className="text-sm font-extrabold text-downGreen mt-1 font-mono">
+                                                                {safeToFixed(selectedQuote?.low)}
+                                                            </p>
+                                                        </div>
+                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
+                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">昨收價</p>
+                                                            <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
+                                                                {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined
+                                                                    ? safeToFixed(selectedQuote.price - selectedQuote.change) 
+                                                                    : "—"}
+                                                            </p>
+                                                        </div>
+                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800 col-span-2 md:col-span-1">
+                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">今日成交量</p>
+                                                            <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
+                                                                {formatVolume(selectedQuote?.volume, false)}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* 圖表與指標區塊 */}
+                                            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col">
+                                                
+                                                {/* 圖表控制與分時/K線選擇 */}
+                                                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3 mb-4">
+                                                    <div className="flex space-x-6 text-sm font-bold">
+                                                        <button 
+                                                            onClick={() => setChartType("trend")}
+                                                            className={`pb-2 border-b-2 transition ${chartType === "trend" ? 'border-indigo-600 dark:border-emerald-500 text-indigo-600 dark:text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                                                        >
+                                                            走勢
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => setChartType("kline")}
+                                                            className={`pb-2 border-b-2 transition ${chartType === "kline" ? 'border-indigo-600 dark:border-emerald-500 text-indigo-600 dark:text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                                                        >
+                                                            K線
+                                                        </button>
+                                                    </div>
                                                     
-                                                    {/* 左側：代號名稱 */}
-                                                    <div className="flex items-center space-x-3">
-                                                        <div className="h-12 w-12 bg-indigo-50 dark:bg-slate-700 rounded-xl flex items-center justify-center font-black text-indigo-600 dark:text-indigo-400">
-                                                            {selectedSymbol.substring(0,2)}
+                                                    {/* 右側切換器 */}
+                                                    {selectedSymbol === "WTX&" && chartType === "trend" && (
+                                                        <div className="flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                                                            <button 
+                                                                onClick={() => setFuturesSession("day")}
+                                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${futuresSession === "day" ? 'bg-indigo-600 text-white dark:bg-slate-700 dark:text-slate-100' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                                                            >
+                                                                日盤
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => setFuturesSession("night")}
+                                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${futuresSession === "night" ? 'bg-indigo-600 text-white dark:bg-slate-700 dark:text-slate-100' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                                                            >
+                                                                夜盤
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    {chartType === "kline" && (
+                                                        <div className="flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                                                            {['1M', '3M', '6M'].map(range => (
+                                                                <button 
+                                                                    key={range}
+                                                                    onClick={() => setKlineRange(range)}
+                                                                    className={`px-3 py-1 text-xs font-bold rounded-md transition ${klineRange === range ? 'bg-indigo-600 text-white dark:bg-slate-700 dark:text-slate-100' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                                                                >
+                                                                    {range === '1M' ? '30天' : range === '3M' ? '90天' : '半年'}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* 指標與細部價格 (當選中指數卡片或台指期時，直接在圖表上方顯示) */}
+                                                {(selectedSymbol === "^TWII" || selectedSymbol === "^TWOII" || selectedSymbol === "WTX&") && (
+                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4 py-3 px-4 bg-slate-50 dark:bg-slate-900/40 rounded-xl border border-slate-100 dark:border-slate-800 text-xs font-bold">
+                                                        <div>
+                                                            <span className="text-slate-400 block">開盤</span>
+                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                                {safeToFixed(selectedQuote?.open, getDecimals(selectedSymbol))}
+                                                            </span>
                                                         </div>
                                                         <div>
-                                                            <div className="flex items-center space-x-2">
-                                                                <h2 className="text-xl font-black text-slate-800 dark:text-white">{selectedSymbol}</h2>
-                                                                <span className="px-2 py-0.5 text-xs font-bold bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 rounded-md">
-                                                                    {activeStockInfo.category === "etf" ? "ETF 投信資產" : "上市櫃股票"}
-                                                                </span>
-                                                            </div>
-                                                            <p className="text-sm font-semibold text-slate-500 dark:text-slate-400 mt-0.5">{activeStockInfo.name}</p>
+                                                            <span className="text-slate-400 block">最高</span>
+                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                                {safeToFixed(selectedQuote?.high, getDecimals(selectedSymbol))}
+                                                            </span>
+                                                        </div>
+                                                        <div>
+                                                            <span className="text-slate-400 block">最低</span>
+                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                                {safeToFixed(selectedQuote?.low, getDecimals(selectedSymbol))}
+                                                            </span>
+                                                        </div>
+                                                        <div>
+                                                            <span className="text-slate-400 block">收盤</span>
+                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                                {safeToFixed(selectedQuote?.price, getDecimals(selectedSymbol))}
+                                                            </span>
+                                                        </div>
+                                                        <div className="col-span-2 md:col-span-1">
+                                                            <span className="text-slate-400 block">成交量</span>
+                                                            <span className="text-base font-extrabold text-slate-700 dark:text-slate-200 font-mono">
+                                                                {formatVolume(selectedQuote?.volume, selectedSymbol === "WTX&")}
+                                                            </span>
                                                         </div>
                                                     </div>
+                                                )}
 
-                                                    {/* 中間：最新成交價格 */}
-                                                    <div className="flex items-baseline space-x-4">
-                                                        <div className="text-3xl font-black font-mono tracking-tight text-slate-800 dark:text-white">
-                                                            {safeToFixed(selectedQuote?.price)}
-                                                        </div>
-                                                        {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined && (
-                                                            <div className={`text-base font-bold flex items-center ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                <span className="mr-1">{selectedQuote.change >= 0 ? '▲' : '▼'}</span>
-                                                                <span>{safeToFixed(Math.abs(selectedQuote.change))}</span>
-                                                                <span className="ml-1.5">({safePercent(selectedQuote.changePercent)})</span>
-                                                            </div>
-                                                        )}
-                                                    </div>
-
-                                                    {/* 右側：雲端即時行情指示器 */}
-                                                    <div className="text-xs text-right text-slate-400 dark:text-slate-500">
-                                                        <div className="flex items-center justify-end space-x-1">
-                                                            <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
-                                                            <span className="font-semibold text-slate-600 dark:text-slate-300">Yahoo 實時行情連線</span>
-                                                        </div>
-                                                        <p className="mt-1">每 30 秒自動靜默刷新，或手動強制刷新</p>
-                                                    </div>
+                                                <div className="flex items-center space-x-2 mb-4">
+                                                    <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse"></span>
+                                                    <h4 className="font-bold text-xs text-slate-500 dark:text-slate-400">
+                                                        {selectedSymbol === "WTX&" && chartType === "trend" 
+                                                            ? `台指電子盤 - ${futuresSession === "day" ? "日盤分時走勢" : "即時夜盤分時走勢"}` 
+                                                            : `${activeStockInfo?.name} (${selectedSymbol}) - ${chartType === "trend" ? "當日分時走勢" : "歷史K線走勢"}`}
+                                                        {chartLoading && <span className="text-xs text-indigo-500 font-semibold ml-2">(載入中...)</span>}
+                                                    </h4>
                                                 </div>
 
-                                                {/* 台灣傳統看盤細部五檔精華區塊 */}
-                                                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-6 pt-6 border-t border-slate-100 dark:border-slate-700/60">
-                                                    <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">開盤價</p>
-                                                        <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                            {safeToFixed(selectedQuote?.open)}
-                                                        </p>
-                                                    </div>
-                                                    <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最高價</p>
-                                                        <p className="text-sm font-extrabold text-upRed mt-1 font-mono">
-                                                            {safeToFixed(selectedQuote?.high)}
-                                                        </p>
-                                                    </div>
-                                                    <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最低價</p>
-                                                        <p className="text-sm font-extrabold text-downGreen mt-1 font-mono">
-                                                            {safeToFixed(selectedQuote?.low)}
-                                                        </p>
-                                                    </div>
-                                                    <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">昨收價</p>
-                                                        <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined
-                                                                ? safeToFixed(selectedQuote.price - selectedQuote.change) 
-                                                                : "—"}
-                                                        </p>
-                                                    </div>
-                                                    <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800 col-span-2 md:col-span-1">
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">今日成交量</p>
-                                                        <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                            {selectedQuote && selectedQuote.volume !== null && selectedQuote.volume !== undefined 
-                                                                ? Number(selectedQuote.volume).toLocaleString() 
-                                                                : "—"}{" "}
-                                                            <span className="text-[10px] text-slate-400">股</span>
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* TradingView K 線圖 */}
-                                            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col">
-                                                <div className="flex items-center justify-between mb-4">
-                                                    <div className="flex items-center space-x-2">
-                                                        <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse"></span>
-                                                        <h3 className="font-bold text-sm text-slate-800 dark:text-white flex items-center space-x-2">
-                                                            <span>真實 Yahoo 財經歷史走勢資料</span>
-                                                            {chartLoading && <span className="text-xs text-indigo-500 font-semibold">(載入K線中...)</span>}
-                                                        </h3>
-                                                    </div>
-                                                    
-                                                    {/* 時間範圍選擇器 */}
-                                                    <div className="flex bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
-                                                        {['1M', '3M', '6M'].map(range => (
-                                                            <button 
-                                                                key={range}
-                                                                onClick={() => setKlineRange(range)}
-                                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${klineRange === range ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-800 dark:hover:text-slate-150'}`}
-                                                            >
-                                                                {range === '1M' ? '30天' : range === '3M' ? '90天' : '半年'}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                </div>
-
-                                                {/* K線畫布 */}
+                                                {/* K線與走勢畫布 */}
                                                 <div ref={chartContainerRef} className="w-full h-[320px] bg-white dark:bg-slate-800 rounded-xl overflow-hidden" />
                                             </div>
 
-                                            {/* 投資筆記編輯欄位 */}
-                                            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
-                                                <div className="flex items-center justify-between mb-3">
-                                                    <h3 className="font-bold text-sm text-slate-800 dark:text-white flex items-center space-x-2">
-                                                        <span className="text-amber-500">✍️</span>
-                                                        <span>自選股操作筆記（滑鼠離開編輯框時將自動上傳存檔）</span>
-                                                    </h3>
+                                            {/* 投資筆記編輯欄位 - 只有在自選清單裡的標的才顯示 */}
+                                            {watchlist.some(item => item.symbol === selectedSymbol) && (
+                                                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <h3 className="font-bold text-sm text-slate-800 dark:text-white flex items-center space-x-2">
+                                                            <span className="text-amber-500">✍️</span>
+                                                            <span>自選股操作筆記（滑鼠離開編輯框時將自動上傳存檔）</span>
+                                                        </h3>
+                                                    </div>
+                                                    <textarea 
+                                                        value={activeStockInfo.note || ""}
+                                                        onChange={(e) => handleNoteChange(selectedSymbol, e.target.value)}
+                                                        onBlur={handleNoteBlur}
+                                                        placeholder="在此輸入該觀察股的進出場策略、籌碼分析壓力關卡或季報基本面追蹤筆記..."
+                                                        className="w-full h-32 px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-800 dark:text-slate-150 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                    />
                                                 </div>
-                                                <textarea 
-                                                    value={activeStockInfo.note || ""}
-                                                    onChange={(e) => handleNoteChange(selectedSymbol, e.target.value)}
-                                                    onBlur={handleNoteBlur}
-                                                    placeholder="在此輸入該觀察股的進出場策略、籌碼分析壓力關卡或季報基本面追蹤筆記..."
-                                                    className="w-full h-32 px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-800 dark:text-slate-150 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                                />
-                                            </div>
+                                            )}
                                         </>
                                     ) : (
                                         <div className="p-12 text-center text-slate-400">
@@ -1094,8 +1337,14 @@
                                             </div>
                                             <div className="flex flex-col items-end">
                                                 <span className="text-xs text-slate-400">建議分類</span>
-                                                <span className={`px-2 py-0.5 text-[10px] font-bold rounded mt-1 ${newCategory === 'etf' ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700' : 'bg-red-100 dark:bg-red-900/40 text-red-700'}`}>
-                                                    {newCategory === 'etf' ? 'ETF 基金' : '一般個股'}
+                                                <span className={`px-2 py-0.5 text-[10px] font-bold rounded mt-1 ${
+                                                    newCategory === 'etf' 
+                                                        ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700' 
+                                                        : newCategory === 'us'
+                                                            ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700'
+                                                            : 'bg-red-100 dark:bg-red-900/40 text-red-700'
+                                                }`}>
+                                                    {newCategory === 'etf' ? 'ETF 基金' : newCategory === 'us' ? '美股 & ADR' : '一般個股'}
                                                 </span>
                                             </div>
                                         </div>
@@ -1111,6 +1360,7 @@
                                         >
                                             <option value="stock">一般個股 (股票)</option>
                                             <option value="etf">指數型/高股息基金 (ETF)</option>
+                                            <option value="us">美股熱門 & ADR</option>
                                         </select>
                                     </div>
 
@@ -1159,7 +1409,12 @@
             "0056": { name: "元大高股息", price: 38.65, category: "etf" },
             "00878": { name: "國泰永續高股息", price: 22.90, category: "etf" },
             "00919": { name: "群益台灣精選高息", price: 25.10, category: "etf" },
-            "00940": { name: "元大台灣價值高息", price: 9.65, category: "etf" }
+            "00940": { name: "元大台灣價值高息", price: 9.65, category: "etf" },
+            "WTX&": { name: "台指期近月", price: 46301, category: "stock" },
+            "TSM": { name: "台積電 ADR", price: 172.5, category: "us" },
+            "NVDA": { name: "輝達", price: 127.4, category: "us" },
+            "AAPL": { name: "蘋果", price: 214.3, category: "us" },
+            "QQQ": { name: "納斯達克 100 ETF", price: 478.2, category: "us" }
         };
 
         const rootElement = document.getElementById('root');
