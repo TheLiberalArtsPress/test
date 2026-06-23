@@ -154,8 +154,16 @@
             
             // 已更新：將預設的 Apps Script Web App 網址替換為您提供的最新 exec 部署網址
             const [gasUrl, setGasUrl] = useState(() => {
-                const local = localStorage.getItem('stockwatch_gas_url');
-                return local !== null ? local : 'https://script.google.com/macros/s/AKfycbFr7OSYqEFs-VFo8dWucLXl6V1ZbRLc6zPIVqgwr_9ViKHSROYE1fl0UVa-V9tabmfVw/exec';
+                const local = localStorage.getItem('stockwatch_gas_url_v3');
+                if (local !== null) {
+                    let cleaned = local.trim();
+                    const lastHttps = cleaned.lastIndexOf("https://");
+                    if (lastHttps > 0) {
+                        cleaned = cleaned.substring(lastHttps);
+                    }
+                    return cleaned;
+                }
+                return 'https://script.google.com/macros/s/AKfycbzhcjOAsu53IJPkVLcWzByT2a4nxlC-CigSSOBrY-Wiwtatr3CQfohamOdqcn0H3GPDbA/exec';
             });
 
             const [cloudSyncEnabled, setCloudSyncEnabled] = useState(true);
@@ -217,7 +225,7 @@
             }, [watchlist]);
 
             useEffect(() => {
-                localStorage.setItem('stockwatch_gas_url', gasUrl);
+                localStorage.setItem('stockwatch_gas_url_v3', gasUrl);
                 if (gasUrl) {
                     setCloudSyncEnabled(true);
                 } else {
@@ -225,6 +233,16 @@
                     setCloudConnected(false);
                 }
             }, [gasUrl]);
+
+            const handleGasUrlChange = (value) => {
+                let cleaned = value.trim();
+                // 自動修正因貼上覆蓋出錯所產生的重複 https:// 前綴 (如 https://script.google.chttps://script.google.com/...)
+                const lastHttps = cleaned.lastIndexOf("https://");
+                if (lastHttps > 0) {
+                    cleaned = cleaned.substring(lastHttps);
+                }
+                setGasUrl(cleaned);
+            };
 
             // === 核心：從 Google Sheet API 即時抓取最新台股報價 (加入防止瀏覽器快取設定) ===
             const loadDataFromCloud = () => {
@@ -837,7 +855,7 @@
                                                     <input 
                                                         type="text"
                                                         value={gasUrl}
-                                                        onChange={(e) => setGasUrl(e.target.value)}
+                                                        onChange={(e) => handleGasUrlChange(e.target.value)}
                                                         placeholder="https://script.google.com/macros/s/.../exec"
                                                         className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-xs text-slate-800 dark:text-slate-150 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                                     />
