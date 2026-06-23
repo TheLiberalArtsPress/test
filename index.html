@@ -213,15 +213,24 @@
             // 已更新：將預設的 Apps Script Web App 網址替換為您提供的最新 exec 部署網址
             const [gasUrl, setGasUrl] = useState(() => {
                 const local = localStorage.getItem('stockwatch_gas_url_v3');
-                if (local !== null) {
+                const defaultUrl = 'https://script.google.com/macros/s/AKfycbzzBShEXcK4R_A76ojzZrm0GjrX1G9kItfcI9Z2oNByMTd_i6jVM6uKzwFrwaMgiIRE/exec';
+                if (local) {
+                    // 自動修正貼上覆蓋出錯的重複前綴
                     let cleaned = local.trim();
                     const lastHttps = cleaned.lastIndexOf("https://");
                     if (lastHttps > 0) {
                         cleaned = cleaned.substring(lastHttps);
                     }
+                    // 自動升級舊版 API 網址到最新網址，防止瀏覽器 LocalStorage 快取舊網址
+                    if (cleaned.includes('AKfycbzhcjOAsu53IJPkVLcWzByT2a4nxlC-CigSSOBrY-Wiwtatr3CQfohamOdqcn0H3GPDbA') || 
+                        cleaned.includes('AKfycbxqJRzMSBR9ks9n0MZ3ue0pc0Att5EVFebL1xq5sIs_xMhqgKB6Mg4R7tI6k3DoEahrzw') ||
+                        cleaned.includes('AKfycbyiIdL2Qt3vCwUxNFl3yt0w2k3NLRb_QYwd0Zhkw4Q-yGlJ29SU2yVH6EdOhRo3B9Qo')) {
+                        localStorage.setItem('stockwatch_gas_url_v3', defaultUrl);
+                        return defaultUrl;
+                    }
                     return cleaned;
                 }
-                return 'https://script.google.com/macros/s/AKfycbxqJRzMSBR9ks9n0MZ3ue0pc0Att5EVFebL1xq5sIs_xMhqgKB6Mg4R7tI6k3DoEahrzw/exec';
+                return defaultUrl;
             });
 
             const [cloudSyncEnabled, setCloudSyncEnabled] = useState(true);
@@ -394,7 +403,7 @@
                         setAddError("");
                     } else {
                         const isUs = /^[A-Z&^]+$/.test(s);
-                        const isEtf = s.length >= 5 && /^00\d+$/.test(s);
+                        const isEtf = /^00/.test(s);
                         setNewNamePreview(`代號 (${s})`);
                         setNewCategory(isUs ? 'us' : (isEtf ? 'etf' : 'stock'));
                         setAddError("");
