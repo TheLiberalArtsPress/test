@@ -722,6 +722,55 @@
                 return activeStockInfo.quote;
             }, [activeStockInfo, selectedSymbol, indexQuotes]);
 
+            const renderIndexCards = () => {
+                const cards = [
+                    { symbol: "^TWII", name: "加權指數", quote: indexQuotes.twii },
+                    { symbol: "^TWOII", name: "櫃買指數", quote: indexQuotes.twoii },
+                    { symbol: "WTX&", name: "台指電子盤", quote: indexQuotes.wtx }
+                ];
+
+                return (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                        {cards.map(card => {
+                            const q = card.quote || {};
+                            const isActive = selectedSymbol === card.symbol;
+                            const isUp = q.change >= 0;
+                            const changeColor = isUp ? 'text-upRed' : 'text-downGreen';
+                            const arrow = isUp ? '▲' : '▼';
+                            
+                            return (
+                                <div 
+                                    key={card.symbol}
+                                    onClick={() => {
+                                        setSelectedSymbol(card.symbol);
+                                        setChartType("trend");
+                                    }}
+                                    className={`relative p-4 rounded-xl cursor-pointer transition-all duration-200 border bg-white dark:bg-slate-800 hover:shadow-md ${
+                                        isActive 
+                                            ? 'border-indigo-500 ring-2 ring-indigo-500/20 dark:border-emerald-500 dark:ring-emerald-500/20 shadow-sm' 
+                                            : 'border-slate-200 dark:border-slate-700/60'
+                                    }`}
+                                >
+                                    <div className="text-xs font-bold text-slate-400 dark:text-slate-400">
+                                        {card.name}
+                                    </div>
+                                    <div className="text-xl md:text-2xl font-black font-mono tracking-tight text-slate-800 dark:text-white mt-1">
+                                        {safeToFixed(q.price, getDecimals(card.symbol))}
+                                    </div>
+                                    <div className={`text-xs md:text-sm font-bold flex items-center mt-1 ${changeColor}`}>
+                                        <span className="mr-0.5">{arrow}</span>
+                                        <span>{safeToFixed(Math.abs(q.change), getDecimals(card.symbol))} ({safePercent(q.changePercent)})</span>
+                                    </div>
+                                    {isActive && (
+                                        <div className="absolute bottom-0 left-0 right-0 h-1 bg-indigo-500 dark:bg-emerald-500 rounded-b-xl" />
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                );
+            };
+
             return (
                 <div className="flex flex-col h-screen min-h-0 bg-slate-50 dark:bg-darkBg overflow-hidden">
                     
