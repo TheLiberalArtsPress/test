@@ -111,10 +111,10 @@
         function App() {
             const [theme, setTheme] = useState('dark');
             
-            // 已綁定您最新提供的 API 網址
+            // 已綁定最新的 GAS URL (使用 v5 強制覆蓋舊的 LocalStorage 設定)
             const [gasUrl, setGasUrl] = useState(() => {
-                const local = localStorage.getItem('stockwatch_gas_url_v4');
-                const defaultUrl = 'https://script.google.com/macros/s/AKfycbzxSD9zAnylmvH2DyxBB1AJL_7Jl3RI90UEinExB-G6oTncwPDvLUl_qS5IDoDXaPm0lA/exec';
+                const local = localStorage.getItem('stockwatch_gas_url_v5');
+                const defaultUrl = 'https://script.google.com/macros/s/AKfycbwVigR_thXpmnLvs9U3b3iFLWTlzCay1-EL8-J8e6t6g0SHHLjiNcyKEFDLPpugddEhpQ/exec';
                 return local || defaultUrl;
             });
 
@@ -125,13 +125,14 @@
             const [loadError, setLoadError] = useState(false);
             
             const [watchlist, setWatchlist] = useState(() => {
-                const local = localStorage.getItem('stockwatch_list_v4');
+                const local = localStorage.getItem('stockwatch_list_v5');
                 if (local) return JSON.parse(local);
                 return [
                     { id: "1", symbol: "2330", name: "台積電", category: "stock", note: "", quote: {} },
                     { id: "2", symbol: "2317", name: "鴻海", category: "stock", note: "", quote: {} },
                     { id: "5", symbol: "WTX&", name: "台指期近月", category: "stock", note: "", quote: {} },
-                    { id: "6", symbol: "TSM", name: "台積電 ADR", category: "us", note: "", quote: {} }
+                    { id: "6", symbol: "TSM", name: "台積電 ADR", category: "us", note: "", quote: {} },
+                    { id: "7", symbol: "^VIX", name: "恐慌指數", category: "us", note: "", quote: {} }
                 ];
             });
 
@@ -168,11 +169,11 @@
             };
 
             useEffect(() => {
-                localStorage.setItem('stockwatch_list_v4', JSON.stringify(watchlist));
+                localStorage.setItem('stockwatch_list_v5', JSON.stringify(watchlist));
             }, [watchlist]);
 
             useEffect(() => {
-                localStorage.setItem('stockwatch_gas_url_v4', gasUrl);
+                localStorage.setItem('stockwatch_gas_url_v5', gasUrl);
                 setCloudSyncEnabled(!!gasUrl);
             }, [gasUrl]);
 
@@ -230,11 +231,12 @@
                 return () => clearInterval(interval);
             }, [gasUrl]);
 
-            // 自動辨識名稱
+            // 自動辨識名稱與判斷類別
             const STOCK_REGISTRY = {
                 "2330": "台積電", "2317": "鴻海", "2454": "聯發科", 
                 "0050": "元大台灣50", "00878": "國泰永續高股息",
-                "TSM": "台積電 ADR", "NVDA": "輝達", "AAPL": "蘋果", "SPY": "標普500", "QQQ": "納指 ETF"
+                "TSM": "台積電 ADR", "NVDA": "輝達", "AAPL": "蘋果", "SPY": "標普500", "QQQ": "納指 ETF",
+                "^VIX": "恐慌指數", "^DJI": "道瓊工業指數", "^IXIC": "納斯達克指數", "^GSPC": "標普500指數"
             };
 
             useEffect(() => {
@@ -244,6 +246,15 @@
                         setNewNamePreview(STOCK_REGISTRY[s]);
                     } else {
                         setNewNamePreview(`代號 (${s})`);
+                    }
+                    
+                    // 自動判斷分類：ETF、美股/國際指數、台股
+                    if (/^00\d+$/.test(s)) {
+                        setNewCategory("etf");
+                    } else if (/^[A-Z\^]+$/.test(s)) {
+                        setNewCategory("us");
+                    } else {
+                        setNewCategory("stock");
                     }
                 } else {
                     setNewNamePreview("");
@@ -328,7 +339,7 @@
                 document.documentElement.classList.toggle('dark', nextTheme === 'dark');
             };
 
-            // 【關鍵修正】：使用 text/plain 繞過 CORS 預檢，確保資料能寫入 Google Sheet
+            // 使用 text/plain 繞過 CORS 預檢，確保資料能寫入 Google Sheet
             const syncToCloud = (currentList) => {
                 if (!gasUrl.trim()) return;
                 setSyncLoading(true);
@@ -556,18 +567,19 @@
                                 <div className="py-4 space-y-4">
                                     <div>
                                         <label className="text-xs font-bold text-slate-500 mb-1 block">股票或 ETF 代號</label>
-                                        <input type="text" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} placeholder="例如: 2330, TSM, QQQ" className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm" />
+                                        <input type="text" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} placeholder="例如: 2330, ^VIX, QQQ" className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm" />
                                     </div>
                                     
                                     {/* 🔥 快速加入按鈕 */}
                                     <div className="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
                                         <label className="text-xs font-bold text-slate-500 mb-2 block">🔥 快速加入熱門標的</label>
                                         <div className="flex flex-wrap gap-2">
+                                            <button onClick={() => { setNewSymbol("^VIX"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-red-100 text-red-700 rounded-md hover:bg-red-200">VIX (恐慌指數)</button>
+                                            <button onClick={() => { setNewSymbol("^DJI"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">道瓊指數</button>
                                             <button onClick={() => { setNewSymbol("TSM"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">TSM (台積電ADR)</button>
                                             <button onClick={() => { setNewSymbol("NVDA"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">NVDA (輝達)</button>
                                             <button onClick={() => { setNewSymbol("AAPL"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">AAPL (蘋果)</button>
                                             <button onClick={() => { setNewSymbol("QQQ"); setNewCategory("etf"); }} className="px-2 py-1 text-xs font-bold bg-indigo-100 text-indigo-700 rounded-md hover:bg-indigo-200">QQQ (納指 ETF)</button>
-                                            <button onClick={() => { setNewSymbol("SPY"); setNewCategory("etf"); }} className="px-2 py-1 text-xs font-bold bg-indigo-100 text-indigo-700 rounded-md hover:bg-indigo-200">SPY (標普 ETF)</button>
                                         </div>
                                     </div>
 
