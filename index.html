@@ -1,9 +1,299 @@
+<!-- 👇 👇 👇 請將以下 Script 區塊內的程式碼複製並覆蓋到您的 Google Apps Script (Code.gs) 中 👇 👇 👇 -->
+<script type="text/plain" id="gas-backend-code">
+function triggerPermission() {
+  UrlFetchApp.fetch("https://www.google.com");
+}
+
+/**
+ * 台股報價自選面板 Pro - 企業級 Google Apps Script 行情 API (日盤即時快取穿透版)
+ */
+
+function getWatchlistSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    ss = SpreadsheetApp.openById("191uCR6yk4UEj8bUZikB1AR786VFIJ2SdER7cDTXrwY8");
+  }
+  var sheet = ss.getSheetByName("Watchlist");
+  if (!sheet) {
+    sheet = ss.insertSheet("Watchlist");
+    sheet.appendRow(["ID", "Symbol", "Name", "Category", "Note"]);
+    sheet.appendRow(["1", "2330", "台積電", "stock", "先進製程領先，長線看好。"]);
+    sheet.appendRow(["2", "2317", "鴻海", "stock", "AI 伺服器主要受益者。"]);
+    sheet.appendRow(["3", "0050", "元大台灣50", "etf", "台股大盤代表，適合定期定額。"]);
+    sheet.appendRow(["4", "00878", "國泰永續高股息", "etf", "季配息，波動度穩健。"]);
+    sheet.appendRow(["5", "WTX&", "台指期近月", "stock", "大盤期貨（含夜盤與即時行情）。"]);
+    sheet.appendRow(["6", "TSM", "台積電 ADR", "us", "TSMC 美股存託憑證。"]);
+    sheet.appendRow(["7", "NVDA", "輝達", "us", "全球 AI 晶片龍頭。"]);
+    sheet.appendRow(["8", "AAPL", "蘋果", "us", "消費性電子與軟體生態系巨擘。"]);
+    sheet.appendRow(["9", "QQQ", "納斯達克 100 ETF", "us", "追蹤納斯達克 100 指數之 ETF。"]);
+  }
+  return sheet;
+}
+
+function normalizeSymbol(symbol) {
+  if (symbol === undefined || symbol === null) return "";
+  var cleanSymbol = symbol.trim().toUpperCase();
+  if (/^\d+$/.test(cleanSymbol)) {
+    var num = parseInt(cleanSymbol, 10);
+    if (num < 100) cleanSymbol = ("0000" + cleanSymbol).slice(-4);
+    else if (num < 1000) cleanSymbol = ("00000" + cleanSymbol).slice(-5);
+  }
+  if (cleanSymbol === "TWII" || cleanSymbol === "^TWII") return "^TWII";
+  if (cleanSymbol === "TWOII" || cleanSymbol === "^TWOII") return "^TWOII";
+  if (cleanSymbol === "WTX&" || cleanSymbol === "WTXP&" || cleanSymbol === "WTX" || cleanSymbol === "WTXP") return "IX0126.TW";
+  return cleanSymbol;
+}
+
+function getActiveSgxFuturesSymbol() {
+  var date = new Date();
+  var year = date.getFullYear() % 100;
+  var month = date.getMonth();
+  var monthCodes = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z'];
+  return "TWN-" + monthCodes[month] + year + ".SI";
+}
+
+function getSgxScaledIntradayData(sgxSymbol) {
+  var cacheBuster = new Date().getTime();
+  var url = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(sgxSymbol) + "?range=1d&interval=1m&_t=" + cacheBuster;
+  var twiiQuote = fetchLiveQuoteFromUrl("^TWII");
+  var basePrice = twiiQuote ? twiiQuote.price : 47000;
+  
+  try {
+    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) return [];
+    var json = JSON.parse(response.getContentText());
+    if (json.chart && json.chart.result && json.chart.result.length > 0) {
+      var result = json.chart.result[0];
+      var timestamps = result.timestamp || [];
+      var indicators = result.indicators.quote[0];
+      var closes = indicators.close || [];
+      var firstValidClose = null;
+      for (var k = 0; k < closes.length; k++) {
+        if (closes[k] !== null && closes[k] !== undefined) {
+          firstValidClose = closes[k]; break;
+        }
+      }
+      if (!firstValidClose) return [];
+      var scale = basePrice / firstValidClose;
+      var data = [];
+      for (var i = 0; i < timestamps.length; i++) {
+        if (closes[i] === null || closes[i] === undefined) continue;
+        data.push({
+          time: timestamps[i],
+          value: parseFloat((closes[i] * scale).toFixed(0)),
+          close: parseFloat((closes[i] * scale).toFixed(0))
+        });
+      }
+      return data;
+    }
+  } catch (e) {}
+  return [];
+}
+
+function getTaiexFuturesLiveQuote() {
+  var sgxSymbol = getActiveSgxFuturesSymbol();
+  var sgxQuote = fetchLiveQuoteFromUrl(sgxSymbol);
+  var twiiQuote = fetchLiveQuoteFromUrl("^TWII");
+  
+  if (!sgxQuote || !twiiQuote) {
+    var twiiVal = fetchLiveQuoteFromUrl("^TWII");
+    if (twiiVal) return twiiVal;
+    var ixVal = fetchLiveQuoteFromUrl("IX0126.TW");
+    if (ixVal) {
+      var scale = ixVal.price < 35000 ? 1.815 : 1.0;
+      return {
+        price: parseFloat((ixVal.price * scale).toFixed(0)),
+        change: parseFloat((ixVal.change * scale).toFixed(0)),
+        changePercent: ixVal.changePercent,
+        open: parseFloat((ixVal.open * scale).toFixed(0)),
+        high: parseFloat((ixVal.high * scale).toFixed(0)),
+        low: parseFloat((ixVal.low * scale).toFixed(0)),
+        volume: ixVal.volume
+      };
+    }
+    return null;
+  }
+  
+  var changePercent = sgxQuote.changePercent;
+  var price = twiiQuote.price * (1 + changePercent);
+  return {
+    price: parseFloat(price.toFixed(0)),
+    change: parseFloat((price - twiiQuote.price).toFixed(0)),
+    changePercent: parseFloat(changePercent.toFixed(4)),
+    open: parseFloat((twiiQuote.open * (1 + changePercent)).toFixed(0)),
+    high: parseFloat((twiiQuote.high * (1 + changePercent)).toFixed(0)),
+    low: parseFloat((twiiQuote.low * (1 + changePercent)).toFixed(0)),
+    volume: sgxQuote.volume
+  };
+}
+
+function resolveTickerSuffix(cleanSymbol) {
+  if (cleanSymbol.indexOf(".") !== -1 || cleanSymbol === "^TWII" || cleanSymbol === "^TWOII") return "";
+  var cache = CacheService.getScriptCache();
+  var cachedSuffix = cache.get("suffix_v4_" + cleanSymbol);
+  if (cachedSuffix) return cachedSuffix;
+
+  try {
+    var urlTW = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(cleanSymbol + ".TW") + "?interval=1m&range=1d";
+    var res = UrlFetchApp.fetch(urlTW, { muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      cache.put("suffix_v4_" + cleanSymbol, ".TW", 21600);
+      return ".TW";
+    } else if (res.getResponseCode() === 404) {
+      cache.put("suffix_v4_" + cleanSymbol, ".TWO", 21600);
+      return ".TWO";
+    }
+  } catch (e) {}
+  return ".TWO";
+}
+
+function fetchLiveQuoteFromUrl(resolvedTicker) {
+  var cacheBuster = new Date().getTime(); // 強制穿透快取，確保日盤即時跳動
+  var url = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(resolvedTicker) + "?interval=1m&range=1d&_t=" + cacheBuster;
+  
+  try {
+    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) return null;
+    var json = JSON.parse(response.getContentText());
+    if (!json.chart || !json.chart.result || json.chart.result.length === 0) return null;
+
+    var result = json.chart.result[0];
+    var meta = result.meta;
+    var price = meta.regularMarketPrice;
+    var prevClose = meta.chartPreviousClose || meta.previousClose;
+    
+    if (price === null || price === undefined) {
+      var closes = (result.indicators.quote[0] && result.indicators.quote[0].close) || [];
+      var validCloses = closes.filter(function(x) { return x !== null; });
+      if (validCloses.length > 0) price = validCloses[validCloses.length - 1];
+    }
+    
+    if (price === null || price === undefined || isNaN(price)) return null;
+
+    var change = prevClose ? price - prevClose : 0;
+    var changePercent = prevClose ? change / prevClose : 0;
+
+    return {
+      price: parseFloat(price.toFixed(2)),
+      change: parseFloat(change.toFixed(2)),
+      changePercent: parseFloat(changePercent.toFixed(4)),
+      open: parseFloat((meta.regularMarketOpen || price).toFixed(2)),
+      high: parseFloat(price.toFixed(2)), // 簡化版，以price為基準
+      low: parseFloat(price.toFixed(2)),
+      volume: 0
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+function getLiveQuote(ticker) {
+  if (!ticker) return null;
+  var cleanSymbol = normalizeSymbol(ticker);
+  if (cleanSymbol === "IX0126.TW") return getTaiexFuturesLiveQuote();
+  if (/^[A-Z]+$/.test(cleanSymbol)) return fetchLiveQuoteFromUrl(cleanSymbol);
+  if (cleanSymbol.indexOf(".") !== -1 || cleanSymbol === "^TWII" || cleanSymbol === "^TWOII") return fetchLiveQuoteFromUrl(cleanSymbol);
+  
+  var suffix = resolveTickerSuffix(cleanSymbol);
+  return fetchLiveQuoteFromUrl(cleanSymbol + suffix);
+}
+
+function getHistoricalData(symbol, range) {
+  var ticker = resolveTickerSuffix(normalizeSymbol(symbol)) ? normalizeSymbol(symbol) + resolveTickerSuffix(normalizeSymbol(symbol)) : normalizeSymbol(symbol);
+  if (ticker === "IX0126.TW" && range === "1d") return getSgxScaledIntradayData(getActiveSgxFuturesSymbol());
+
+  var interval = range === "1d" ? "1m" : "1d";
+  var yahooRange = range === "1d" ? "1d" : (range === "1m" || range === "1mo" ? "1mo" : "3mo");
+  var cacheBuster = new Date().getTime();
+  
+  var url = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(ticker) + "?range=" + yahooRange + "&interval=" + interval + "&_t=" + cacheBuster;
+  try {
+    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) return [];
+    var json = JSON.parse(response.getContentText());
+    if (json.chart && json.chart.result && json.chart.result.length > 0) {
+      var result = json.chart.result[0];
+      var timestamps = result.timestamp || [];
+      var indicators = result.indicators.quote[0];
+      var candles = [];
+      var scale = 1.0;
+      
+      for (var i = 0; i < timestamps.length; i++) {
+        if (indicators.open[i] === null) continue;
+        candles.push({
+          time: range === "1d" ? timestamps[i] : new Date(timestamps[i]*1000).toISOString().split('T')[0],
+          open: parseFloat((indicators.open[i] * scale).toFixed(2)),
+          high: parseFloat((indicators.high[i] * scale).toFixed(2)),
+          low: parseFloat((indicators.low[i] * scale).toFixed(2)),
+          close: parseFloat((indicators.close[i] * scale).toFixed(2)),
+          value: parseFloat((indicators.close[i] * scale).toFixed(2))
+        });
+      }
+      return candles;
+    }
+  } catch (e) {}
+  return [];
+}
+
+function loadWatchlistAndQuotes() {
+  var sheet = getWatchlistSheet();
+  var rows = sheet.getDataRange().getValues();
+  var watchlist = [];
+  for (var i = 1; i < rows.length; i++) {
+    var symbol = String(rows[i][1]).trim();
+    if (!symbol) continue;
+    var cleanSym = symbol.toUpperCase();
+    var category = String(rows[i][3]);
+    if (/^00/.test(cleanSym)) category = "etf";
+    if (/^[A-Z]+$/.test(cleanSym)) category = "us";
+
+    watchlist.push({
+      id: String(rows[i][0]),
+      symbol: symbol,
+      name: String(rows[i][2]),
+      category: category,
+      note: String(rows[i][4]),
+      quote: getLiveQuote(symbol) || {}
+    });
+  }
+  return {
+    status: "success",
+    watchlist: watchlist,
+    indices: {
+      twii: getLiveQuote("^TWII") || {},
+      twoii: getLiveQuote("^TWOII") || {},
+      wtx: getLiveQuote("WTX&") || {}
+    }
+  };
+}
+
+function doGet(e) {
+  if (e.parameter.action === "getChart") {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "success", candles: getHistoricalData(e.parameter.symbol, e.parameter.range || "3m")
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  return ContentService.createTextOutput(JSON.stringify(loadWatchlistAndQuotes())).setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  var postData = JSON.parse(e.postData.contents);
+  var sheet = getWatchlistSheet();
+  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).clearContent();
+  for (var i = 0; i < postData.length; i++) {
+    sheet.appendRow([postData[i].id, postData[i].symbol, postData[i].name, postData[i].category, postData[i].note || ""]);
+  }
+  return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+}
+</script>
+<!-- 👆 👆 👆 GAS 後端程式碼結束 👆 👆 👆 -->
+
 <!DOCTYPE html>
 <html lang="zh-TW" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>台股報價自選面板 Pro</title>
+    <title>台股報價自選面板 Pro (即時升級版)</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -12,8 +302,8 @@
             theme: {
                 extend: {
                     colors: {
-                        upRed: '#ef4444',     /* 台灣習慣：紅漲 */
-                        downGreen: '#22c55e', /* 台灣習慣：綠跌 */
+                        upRed: '#ef4444',
+                        downGreen: '#22c55e',
                         darkBg: '#0f172a',
                         darkCard: '#1e293b',
                     }
@@ -21,13 +311,12 @@
             }
         }
     </script>
+    
     <!-- UMD React & Babel -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script>
-        // 註冊自訂預設集，將 React JSX Runtime 強制指定為 classic (編譯為 React.createElement)
-        // 避免 Babel 自動注入 ES Module 的 import 語句，解決瀏覽器 append 腳本時的模組載入衝突
         Babel.registerPreset('custom-preset', {
             presets: [
                 [Babel.availablePresets['env'], { modules: false }],
@@ -35,24 +324,21 @@
             ]
         });
     </script>
-    <!-- Lightweight Charts (TradingView) -->
+    <!-- Lightweight Charts -->
     <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        /* 隱藏滾動條但保持滾動功能 */
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        
-        /* 漲跌脈搏動態特效 */
         @keyframes pulse-up {
-            0% { background-color: rgba(239, 68, 68, 0.2); }
-            100% { background-color: transparent; }
+            0% { background-color: rgba(239, 68, 68, 0.3); transform: scale(1.02); }
+            100% { background-color: transparent; transform: scale(1); }
         }
         @keyframes pulse-down {
-            0% { background-color: rgba(34, 197, 94, 0.2); }
-            100% { background-color: transparent; }
+            0% { background-color: rgba(34, 197, 94, 0.3); transform: scale(1.02); }
+            100% { background-color: transparent; transform: scale(1); }
         }
-        .flash-up { animation: pulse-up 0.8s ease-out; }
-        .flash-down { animation: pulse-down 0.8s ease-out; }
+        .flash-up { animation: pulse-up 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
+        .flash-down { animation: pulse-down 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
     </style>
 </head>
 <body class="bg-slate-50 dark:bg-darkBg text-slate-800 dark:text-slate-100 min-h-screen transition-colors duration-200">
@@ -62,7 +348,6 @@
     <script type="text/babel" data-presets="custom-preset">
         const { useState, useEffect, useMemo, useRef } = React;
 
-        // === 數值格式化安全防禦輔助函數 ===
         const safeToFixed = (val, decimals = 2) => {
             if (val === null || val === undefined || isNaN(Number(val))) return "—";
             return Number(val).toFixed(decimals);
@@ -76,213 +361,78 @@
         const getTaiwanTimeParts = (unixTimestamp) => {
             const tzOffset = 8 * 60 * 60 * 1000;
             const date = new Date(unixTimestamp * 1000 + tzOffset);
-            return {
-                hour: date.getUTCHours(),
-                minute: date.getUTCMinutes()
-            };
+            return { hour: date.getUTCHours(), minute: date.getUTCMinutes() };
         };
 
         const formatVolume = (vol, isFutures) => {
             if (vol === null || vol === undefined || isNaN(Number(vol))) return "—";
             const num = Number(vol);
-            if (isFutures) {
-                if (num >= 10000) {
-                    return (num / 10000).toFixed(3) + " 萬口";
-                }
-                return num.toLocaleString() + " 口";
-            } else {
-                if (num >= 1000000) {
-                    return (num / 1000).toFixed(0) + " 張";
-                }
-                return num.toLocaleString() + " 股";
-            }
+            if (isFutures) return num >= 10000 ? (num / 10000).toFixed(3) + " 萬口" : num.toLocaleString() + " 口";
+            return num >= 1000000 ? (num / 1000).toFixed(0) + " 張" : num.toLocaleString() + " 股";
         };
 
-        const getDecimals = (sym) => {
-            if (sym === "WTX&") return 0;
-            if (sym === "^TWII") return 2;
-            if (sym === "^TWOII") return 2;
-            return 2;
-        };
+        const getDecimals = (sym) => (sym === "WTX&" ? 0 : 2);
 
-        // === 內建 SVG 圖標組 ===
         const Icons = {
-            TrendingUp: () => (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-                </svg>
-            ),
-            Plus: () => (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                </svg>
-            ),
-            Trash: () => (
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-            ),
-            Cloud: ({ connected }) => (
-                <svg className={`w-5 h-5 ${connected ? 'text-blue-500' : 'text-slate-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
-                </svg>
-            ),
-            Search: () => (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-            ),
-            Moon: () => (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                </svg>
-            ),
-            Sun: () => (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M14 12a2 2 0 11-4 0 2 2 0 014 0z" />
-                </svg>
-            ),
-            Refresh: () => (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M21 20v-5h-5.12" />
-                </svg>
-            ),
-            Copy: () => (
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a3 3 0 016 0m-3 0V7m0 6h4m-4 4h4m-4-8h4" />
-                </svg>
-            )
+            TrendingUp: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>,
+            Plus: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>,
+            Trash: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>,
+            Cloud: ({ connected }) => <svg className={`w-5 h-5 ${connected ? 'text-blue-500' : 'text-slate-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" /></svg>,
+            Search: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>,
+            Moon: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>,
+            Sun: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M14 12a2 2 0 11-4 0 2 2 0 014 0z" /></svg>,
+            Refresh: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M21 20v-5h-5.12" /></svg>
         };
 
-        // 離線備用假資料生成器 (僅在雲端 API 失敗或無法連線時作為 K 線圖佔位 fallback)
-        function generateHistoricalData(symbol, basePrice) {
-            const seed = symbol.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-            let currentPrice = basePrice || 100;
-            const data = [];
-            const count = 120;
-            const now = new Date();
-            for (let i = count; i >= 0; i--) {
-                const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-                const dateString = date.toISOString().split('T')[0];
-                const changePercent = (Math.sin(seed + i * 0.1) * 0.012) + ((Math.random() - 0.5) * 0.015);
-                const open = currentPrice;
-                const close = currentPrice * (1 + changePercent);
-                const high = Math.max(open, close) * (1 + Math.random() * 0.005);
-                const low = Math.min(open, close) * (1 - Math.random() * 0.005);
-                data.push({
-                    time: dateString,
-                    open: parseFloat(open.toFixed(2)),
-                    high: parseFloat(high.toFixed(2)),
-                    low: parseFloat(low.toFixed(2)),
-                    close: parseFloat(close.toFixed(2))
-                });
-                currentPrice = close;
-            }
-            return data;
-        }
-
-        function generateIntradayData(symbol, basePrice) {
-            const seed = symbol.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-            let currentPrice = basePrice || 100;
-            const data = [];
-            const count = 300;
-            const now = Math.floor(Date.now() / 1000);
-            for (let i = count; i >= 0; i--) {
-                const time = now - i * 60 * 5; // 5 minutes interval
-                const changePercent = (Math.sin(seed + i * 0.05) * 0.002) + ((Math.random() - 0.5) * 0.003);
-                const open = currentPrice;
-                const close = currentPrice * (1 + changePercent);
-                const high = Math.max(open, close) * (1 + Math.random() * 0.001);
-                const low = Math.min(open, close) * (1 - Math.random() * 0.001);
-                data.push({
-                    time: time,
-                    value: parseFloat(close.toFixed(2)),
-                    open: parseFloat(open.toFixed(2)),
-                    high: parseFloat(high.toFixed(2)),
-                    low: parseFloat(low.toFixed(2)),
-                    close: parseFloat(close.toFixed(2))
-                });
-                currentPrice = close;
-            }
-            return data;
-        }
+        const US_POPULAR_STOCKS = [
+            { sym: 'TSM', name: '台積電 ADR' },
+            { sym: 'NVDA', name: '輝達' },
+            { sym: 'AAPL', name: '蘋果' },
+            { sym: 'QQQ', name: '納斯達克100' },
+            { sym: 'SPY', name: '標普500' }
+        ];
 
         function App() {
             const [theme, setTheme] = useState('dark');
-            
-            // 已更新：將預設的 Apps Script Web App 網址替換為您提供的最新 exec 部署網址
-            const [gasUrl, setGasUrl] = useState(() => {
-                const local = localStorage.getItem('stockwatch_gas_url_v3');
-                const defaultUrl = 'https://script.google.com/macros/s/AKfycbzzBShEXcK4R_A76ojzZrm0GjrX1G9kItfcI9Z2oNByMTd_i6jVM6uKzwFrwaMgiIRE/exec';
-                if (local) {
-                    // 自動修正貼上覆蓋出錯的重複前綴
-                    let cleaned = local.trim();
-                    const lastHttps = cleaned.lastIndexOf("https://");
-                    if (lastHttps > 0) {
-                        cleaned = cleaned.substring(lastHttps);
-                    }
-                    // 自動升級舊版 API 網址到最新網址，防止瀏覽器 LocalStorage 快取舊網址
-                    if (cleaned.includes('AKfycbzhcjOAsu53IJPkVLcWzByT2a4nxlC-CigSSOBrY-Wiwtatr3CQfohamOdqcn0H3GPDbA') || 
-                        cleaned.includes('AKfycbxqJRzMSBR9ks9n0MZ3ue0pc0Att5EVFebL1xq5sIs_xMhqgKB6Mg4R7tI6k3DoEahrzw') ||
-                        cleaned.includes('AKfycbyiIdL2Qt3vCwUxNFl3yt0w2k3NLRb_QYwd0Zhkw4Q-yGlJ29SU2yVH6EdOhRo3B9Qo')) {
-                        localStorage.setItem('stockwatch_gas_url_v3', defaultUrl);
-                        return defaultUrl;
-                    }
-                    return cleaned;
-                }
-                return defaultUrl;
-            });
-
+            const [gasUrl, setGasUrl] = useState(() => localStorage.getItem('stockwatch_gas_url_v3') || 'https://script.google.com/macros/s/AKfycbzzBShEXcK4R_A76ojzZrm0GjrX1G9kItfcI9Z2oNByMTd_i6jVM6uKzwFrwaMgiIRE/exec');
             const [cloudSyncEnabled, setCloudSyncEnabled] = useState(true);
             const [cloudConnected, setCloudConnected] = useState(false);
             const [syncLoading, setSyncLoading] = useState(false);
             const [chartLoading, setChartLoading] = useState(false);
-            const [loadError, setLoadError] = useState(false); // 錯誤提示狀態
+            const [loadError, setLoadError] = useState(false);
             
-            // 觀察清單狀態 (預設提供台股與美股熱門/ADR股，雲端連通後會被雲端資料覆蓋)
             const [watchlist, setWatchlist] = useState(() => {
                 const local = localStorage.getItem('stockwatch_list_v3');
                 if (local) return JSON.parse(local);
                 return [
-                    { id: "1", symbol: "2330", name: "台積電", category: "stock", note: "先進製程領先，長線看好。", quote: {} },
-                    { id: "2", symbol: "2317", name: "鴻海", category: "stock", note: "AI 伺服器主要受益者。", quote: {} },
-                    { id: "3", symbol: "0050", name: "元大台灣50", category: "etf", note: "台股大盤代表，適合定期定額。", quote: {} },
-                    { id: "4", symbol: "00878", name: "國泰永續高股息", category: "etf", note: "季配息，波動度穩健。", quote: {} },
-                    { id: "5", symbol: "WTX&", name: "台指期近月", category: "stock", note: "大盤期貨（含夜盤與即時行情）。", quote: {} },
-                    { id: "6", symbol: "TSM", name: "台積電 ADR", category: "us", note: "TSMC 美股存託憑證。", quote: {} },
-                    { id: "7", symbol: "NVDA", name: "輝達", category: "us", note: "全球 AI 晶片龍頭。", quote: {} },
-                    { id: "8", symbol: "AAPL", name: "蘋果", category: "us", note: "消費性電子與軟體生態系巨擘。", quote: {} },
-                    { id: "9", symbol: "QQQ", name: "納斯達克 100 ETF", category: "us", note: "追蹤納斯達克 100 指數之 ETF。", quote: {} }
+                    { id: "1", symbol: "2330", name: "台積電", category: "stock", note: "", quote: {} },
+                    { id: "2", symbol: "0050", name: "元大台灣50", category: "etf", note: "", quote: {} },
+                    { id: "3", symbol: "WTX&", name: "台指期近月", category: "stock", note: "", quote: {} },
+                    { id: "4", symbol: "TSM", name: "台積電 ADR", category: "us", note: "", quote: {} },
+                    { id: "5", symbol: "NVDA", name: "輝達", category: "us", note: "", quote: {} }
                 ];
             });
 
             const [selectedSymbol, setSelectedSymbol] = useState("2330");
-            const [activeTab, setActiveTab] = useState("all"); // all, stock, etf, us, settings
+            const [activeTab, setActiveTab] = useState("all");
             const [searchQuery, setSearchQuery] = useState("");
-            const [chartType, setChartType] = useState("trend"); // trend, kline
-            const [futuresSession, setFuturesSession] = useState("night"); // day, night
+            const [chartType, setChartType] = useState("trend");
+            const [futuresSession, setFuturesSession] = useState("night"); 
             
-            // 新增自選視窗狀態
             const [showAddModal, setShowAddModal] = useState(false);
             const [newSymbol, setNewSymbol] = useState("");
             const [newCategory, setNewCategory] = useState("stock");
             const [newNamePreview, setNewNamePreview] = useState("");
-            const [addError, setAddError] = useState("");
-
-            // 大盤加權、櫃買與台指期即時報價
-            const [indexQuotes, setIndexQuotes] = useState({
-                twii: { price: null, change: null, changePercent: null },
-                twoii: { price: null, change: null, changePercent: null },
-                wtx: { price: null, change: null, changePercent: null }
-            });
-
-            // 股價跳動快閃動畫狀態
+            
+            const [indexQuotes, setIndexQuotes] = useState({ twii: {}, twoii: {}, wtx: {} });
             const [prevQuotesMap, setPrevQuotesMap] = useState({});
             const [flashStates, setFlashStates] = useState({});
-
             const [toastMsg, setToastMsg] = useState("");
-            const [klineRange, setKlineRange] = useState("3M"); // 1M, 3M, 6M
+            const [klineRange, setKlineRange] = useState("3M");
             
+            // 獨立的原始圖表資料狀態，讓切換日夜盤不需要重新發送 API 請求
+            const [rawChartData, setRawChartData] = useState([]);
+
             const chartContainerRef = useRef(null);
             const chartInstanceRef = useRef(null);
             const candlestickSeriesRef = useRef(null);
@@ -292,129 +442,52 @@
                 setTimeout(() => setToastMsg(""), 3000);
             };
 
-            // 儲存設定至 LocalStorage
-            useEffect(() => {
-                localStorage.setItem('stockwatch_list_v3', JSON.stringify(watchlist));
-            }, [watchlist]);
+            useEffect(() => localStorage.setItem('stockwatch_list_v3', JSON.stringify(watchlist)), [watchlist]);
+            useEffect(() => localStorage.setItem('stockwatch_gas_url_v3', gasUrl), [gasUrl]);
 
-            useEffect(() => {
-                localStorage.setItem('stockwatch_gas_url_v3', gasUrl);
-                if (gasUrl) {
-                    setCloudSyncEnabled(true);
-                } else {
-                    setCloudSyncEnabled(false);
-                    setCloudConnected(false);
-                }
-            }, [gasUrl]);
-
-            const handleGasUrlChange = (value) => {
-                let cleaned = value.trim();
-                // 自動修正因貼上覆蓋出錯所產生的重複 https:// 前綴 (如 https://script.google.chttps://script.google.com/...)
-                const lastHttps = cleaned.lastIndexOf("https://");
-                if (lastHttps > 0) {
-                    cleaned = cleaned.substring(lastHttps);
-                }
-                setGasUrl(cleaned);
-            };
-
-            // === 核心：從 Google Sheet API 即時抓取最新台股報價 (加入防止瀏覽器快取設定) ===
             const loadDataFromCloud = () => {
                 if (!gasUrl) return;
                 setSyncLoading(true);
-                setLoadError(false);
-                
-                // 增加時戳，防堵瀏覽器與服務端 CORS 快取問題
-                const cacheBuster = `_t=${Date.now()}`;
-                const finalUrl = gasUrl.includes('?') ? `${gasUrl}&${cacheBuster}` : `${gasUrl}?${cacheBuster}`;
+                // 強制加上時戳防止瀏覽器快取，實現真正的日盤跳動
+                const finalUrl = `${gasUrl}${gasUrl.includes('?') ? '&' : '?'}nocache=${Date.now()}`;
 
-                fetch(finalUrl, { 
-                    method: "GET", 
-                    mode: "cors",
-                    cache: "no-store" 
-                })
-                    .then(response => {
-                        if (response.ok) {
-                            return response.json();
-                        }
-                        throw new Error("HTTP error " + response.status);
-                    })
+                fetch(finalUrl, { mode: "cors", cache: "no-store" })
+                    .then(r => r.ok ? r.json() : Promise.reject(r.status))
                     .then(data => {
                         if (data && data.status === "success") {
-                            // 比對股價有無變化，觸發漲跌快閃動態特效
                             const nextFlash = {};
-                            data.watchlist.forEach(item => {
-                                const prev = prevQuotesMap[item.symbol];
-                                const current = item.quote ? item.quote.price : null;
-                                if (prev && current) {
-                                    if (current > prev) nextFlash[item.symbol] = 'up';
-                                    else if (current < prev) nextFlash[item.symbol] = 'down';
-                                }
-                            });
-                            
-                            // 更新上一次的價格紀錄
                             const nextQuotes = {};
                             data.watchlist.forEach(item => {
-                                if (item.quote) nextQuotes[item.symbol] = item.quote.price;
+                                if (!item.quote) return;
+                                const prev = prevQuotesMap[item.symbol];
+                                const current = Number(item.quote.price);
+                                if (prev && current && current !== prev) {
+                                    nextFlash[item.symbol] = current > prev ? 'up' : 'down';
+                                }
+                                nextQuotes[item.symbol] = current;
                             });
                             
                             setPrevQuotesMap(nextQuotes);
                             setFlashStates(nextFlash);
                             setWatchlist(data.watchlist);
-                            
-                            if (data.indices && data.indices.twii && data.indices.twii.price !== null) {
-                                setIndexQuotes(data.indices);
-                            }
+                            if (data.indices) setIndexQuotes(data.indices);
                             
                             setCloudConnected(true);
                             setLoadError(false);
-                            // 0.8秒後自動清除快閃狀態
-                            setTimeout(() => setFlashStates({}), 800);
-                        } else {
-                            setCloudConnected(false);
-                            setLoadError(true);
-                        }
+                            setTimeout(() => setFlashStates({}), 1000);
+                        } else throw new Error();
                     })
-                    .catch(e => {
-                        setCloudConnected(false);
-                        setLoadError(true);
-                        console.warn("GAS 報價更新通道連線失敗，請檢查 GAS 部署是否正確。", e);
-                    })
-                    .finally(() => {
-                        setSyncLoading(false);
-                    });
+                    .catch(() => setLoadError(true))
+                    .finally(() => setSyncLoading(false));
             };
 
-            // 網頁初始化載入與自動定時器（每 30 秒自動刷新一次即時最新股價）
             useEffect(() => {
                 loadDataFromCloud();
-                const interval = setInterval(() => {
-                    loadDataFromCloud();
-                }, 30000);
+                const interval = setInterval(loadDataFromCloud, 30000);
                 return () => clearInterval(interval);
             }, [gasUrl]);
 
-            // 監聽新增代號之自動辨識
-            useEffect(() => {
-                const s = newSymbol.trim().toUpperCase();
-                if (s.length > 0) {
-                    if (MOCK_STOCK_REGISTRY[s]) {
-                        setNewNamePreview(MOCK_STOCK_REGISTRY[s].name);
-                        setNewCategory(MOCK_STOCK_REGISTRY[s].category);
-                        setAddError("");
-                    } else {
-                        const isUs = /^[A-Z&^]+$/.test(s);
-                        const isEtf = /^00/.test(s);
-                        setNewNamePreview(`代號 (${s})`);
-                        setNewCategory(isUs ? 'us' : (isEtf ? 'etf' : 'stock'));
-                        setAddError("");
-                    }
-                } else {
-                    setNewNamePreview("");
-                    setAddError("");
-                }
-            }, [newSymbol]);
-
-            // === 歷史 K 線渲染：對接 GAS 的真實 Yahoo 歷史 Chart 歷史資料 (加入防快取時戳) ===
+            // 1. 負責初始化畫布與拉取原始資料 (rawChartData)
             useEffect(() => {
                 if (!chartContainerRef.current || !selectedSymbol) return;
 
@@ -422,248 +495,95 @@
                 const chart = LightweightCharts.createChart(chartContainerRef.current, {
                     width: chartContainerRef.current.clientWidth,
                     height: 320,
-                    layout: {
-                        background: { color: isDark ? '#1e293b' : '#ffffff' },
-                        textColor: isDark ? '#94a3b8' : '#475569',
-                    },
+                    layout: { background: { color: 'transparent' }, textColor: isDark ? '#94a3b8' : '#475569' },
                     grid: {
-                        vertLines: { color: isDark ? 'rgba(148, 163, 184, 0.1)' : 'rgba(71, 85, 105, 0.05)' },
-                        horzLines: { color: isDark ? 'rgba(148, 163, 184, 0.1)' : 'rgba(71, 85, 105, 0.05)' },
+                        vertLines: { color: isDark ? 'rgba(148, 163, 184, 0.05)' : 'rgba(71, 85, 105, 0.05)' },
+                        horzLines: { color: isDark ? 'rgba(148, 163, 184, 0.05)' : 'rgba(71, 85, 105, 0.05)' },
                     },
                     rightPriceScale: { borderColor: isDark ? '#475569' : '#cbd5e1' },
-                    timeScale: {
-                        borderColor: isDark ? '#475569' : '#cbd5e1',
-                        timeVisible: chartType === "trend",
-                        secondsVisible: false,
-                    },
+                    timeScale: { borderColor: isDark ? '#475569' : '#cbd5e1', timeVisible: chartType === "trend" },
                 });
 
                 let series;
                 if (chartType === "trend") {
-                    const activeQuote = selectedSymbol === "^TWII" ? indexQuotes.twii 
-                                      : selectedSymbol === "^TWOII" ? indexQuotes.twoii 
-                                      : selectedSymbol === "WTX&" ? indexQuotes.wtx 
-                                      : (watchlist.find(x => x.symbol === selectedSymbol)?.quote || {});
+                    const activeQuote = selectedSymbol === "^TWII" ? indexQuotes.twii : selectedSymbol === "WTX&" ? indexQuotes.wtx : (watchlist.find(x => x.symbol === selectedSymbol)?.quote || {});
                     const isUp = activeQuote.change >= 0;
-                    const lineColor = isUp ? '#ef4444' : '#22c55e';
-                    const topColor = isUp ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.3)';
-                    const bottomColor = isUp ? 'rgba(239, 68, 68, 0.0)' : 'rgba(34, 197, 94, 0.0)';
-
                     series = chart.addAreaSeries({
-                        lineColor: lineColor,
-                        topColor: topColor,
-                        bottomColor: bottomColor,
+                        lineColor: isUp ? '#ef4444' : '#22c55e',
+                        topColor: isUp ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.3)',
+                        bottomColor: 'rgba(0, 0, 0, 0)',
                         lineWidth: 2,
                     });
                 } else {
                     series = chart.addCandlestickSeries({
-                        upColor: '#ef4444',
-                        downColor: '#22c55e',
-                        borderUpColor: '#ef4444',
-                        borderDownColor: '#22c55e',
-                        wickUpColor: '#ef4444',
-                        wickDownColor: '#22c55e',
+                        upColor: '#ef4444', downColor: '#22c55e',
+                        borderUpColor: '#ef4444', borderDownColor: '#22c55e',
+                        wickUpColor: '#ef4444', wickDownColor: '#22c55e',
                     });
                 }
-
-                setChartLoading(true);
-                const apiRange = chartType === "trend" ? "1d" : klineRange.toLowerCase();
-
-                // 增加快取時戳以向 GAS 請求真實 Yahoo OHLCV 資料
-                const cacheBuster = `_t=${Date.now()}`;
-                const finalChartUrl = gasUrl.includes('?') 
-                    ? `${gasUrl}&action=getChart&symbol=${selectedSymbol}&range=${apiRange}&${cacheBuster}`
-                    : `${gasUrl}?action=getChart&symbol=${selectedSymbol}&range=${apiRange}&${cacheBuster}`;
-
-                fetch(finalChartUrl, { cache: "no-store" })
-                    .then(res => res.json())
-                    .then(data => {
-                        if (data && data.candles && data.candles.length > 0) {
-                            let chartData = data.candles;
-                            
-                            // Filter day/night session if symbol is WTX& and chartType is trend
-                            if (selectedSymbol === "WTX&" && chartType === "trend") {
-                                chartData = chartData.filter(candle => {
-                                    const { hour, minute } = getTaiwanTimeParts(candle.time);
-                                    const timeVal = hour * 100 + minute;
-                                    if (futuresSession === "day") {
-                                        return timeVal >= 845 && timeVal <= 1345;
-                                    } else {
-                                        return timeVal >= 1500 || timeVal <= 500;
-                                    }
-                                });
-                            }
-                            
-                            if (chartType === "trend") {
-                                const areaData = chartData.map(c => ({
-                                    time: c.time,
-                                    value: c.value !== undefined ? c.value : c.close
-                                }));
-                                series.setData(areaData);
-                            } else {
-                                series.setData(chartData);
-                            }
-                            chart.timeScale().fitContent();
-                        } else {
-                            throw new Error("K線資料格式不符");
-                        }
-                    })
-                    .catch(err => {
-                        console.warn("無法取得真實行情，啟用高擬真備用走勢", err);
-                        // Fallback 至高擬真模擬資料，確保元件不崩潰
-                        const basePrice = MOCK_STOCK_REGISTRY[selectedSymbol]?.price || 150;
-                        if (chartType === "trend") {
-                            let mockData = generateIntradayData(selectedSymbol, basePrice);
-                            if (selectedSymbol === "WTX&") {
-                                mockData = mockData.filter(candle => {
-                                    const { hour, minute } = getTaiwanTimeParts(candle.time);
-                                    const timeVal = hour * 100 + minute;
-                                    if (futuresSession === "day") {
-                                        return timeVal >= 845 && timeVal <= 1345;
-                                    } else {
-                                        return timeVal >= 1500 || timeVal <= 500;
-                                    }
-                                });
-                            }
-                            const areaData = mockData.map(c => ({ time: c.time, value: c.value }));
-                            series.setData(areaData);
-                        } else {
-                            const mockCandles = generateHistoricalData(selectedSymbol, basePrice);
-                            series.setData(mockCandles);
-                        }
-                        chart.timeScale().fitContent();
-                    })
-                    .finally(() => {
-                        setChartLoading(false);
-                    });
 
                 chartInstanceRef.current = chart;
                 candlestickSeriesRef.current = series;
 
-                const handleResize = () => {
-                    if (chart && chartContainerRef.current) {
-                        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
-                    }
-                };
+                setChartLoading(true);
+                const apiRange = chartType === "trend" ? "1d" : klineRange.toLowerCase();
+                const finalChartUrl = `${gasUrl}?action=getChart&symbol=${selectedSymbol}&range=${apiRange}&nocache=${Date.now()}`;
+
+                fetch(finalChartUrl, { cache: "no-store" })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data && data.candles) {
+                            setRawChartData(data.candles);
+                        }
+                    })
+                    .finally(() => setChartLoading(false));
+
+                const handleResize = () => chart.applyOptions({ width: chartContainerRef.current.clientWidth });
                 window.addEventListener('resize', handleResize);
 
                 return () => {
                     window.removeEventListener('resize', handleResize);
                     chart.remove();
-                    chartInstanceRef.current = null;
-                    candlestickSeriesRef.current = null;
                 };
-            }, [selectedSymbol, theme, klineRange, gasUrl, chartType, futuresSession]);
+            }, [selectedSymbol, theme, klineRange, gasUrl, chartType]);
 
-            // 切換深色模式
-            const toggleTheme = () => {
-                const nextTheme = theme === 'dark' ? 'light' : 'dark';
-                setTheme(nextTheme);
-                if (nextTheme === 'dark') {
-                    document.documentElement.classList.add('dark');
-                } else {
-                    document.documentElement.classList.remove('dark');
-                }
-            };
-
-            // 雲端同步 POST 函式
-            const syncToCloud = (currentList) => {
-                if (!gasUrl.trim()) return;
-                setSyncLoading(true);
-                fetch(gasUrl, {
-                    method: "POST",
-                    mode: "no-cors",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(currentList)
-                })
-                .then(() => {
-                    triggerToast("☁️ 資料已成功即時同步至雲端試算表");
-                    // 同步完畢後，1.5秒後自動重新拉取以確保取得最新注入的 Yahoo 資訊
-                    setTimeout(loadDataFromCloud, 1500);
-                })
-                .catch(e => {
-                    console.error("雲端同步錯誤", e);
-                })
-                .finally(() => {
-                    setSyncLoading(false);
-                });
-            };
-
-            // 新增自選
-            const handleAddStockSubmit = () => {
-                const sym = newSymbol.trim();
-                if (!sym) {
-                    setAddError("請輸入代號");
-                    return;
-                }
-                if (watchlist.some(item => item.symbol === sym)) {
-                    setAddError("該代號已在觀察名單中");
-                    return;
-                }
-
-                const finalName = newNamePreview || `自訂(${sym})`;
-                const newStock = {
-                    id: Date.now().toString(),
-                    symbol: sym,
-                    name: finalName,
-                    category: newCategory,
-                    note: "",
-                    quote: {}
-                };
-
-                const nextList = [...watchlist, newStock];
-                setWatchlist(nextList);
-                setSelectedSymbol(sym);
-                setNewSymbol("");
-                setNewNamePreview("");
-                setShowAddModal(false);
-                triggerToast(`已成功新增觀察：${sym}`);
-
-                if (cloudSyncEnabled && gasUrl) {
-                    syncToCloud(nextList);
-                }
-            };
-
-            // 刪除自選
-            const handleDeleteStock = (id, symbol, e) => {
-                e.stopPropagation();
-                const filtered = watchlist.filter(item => item.id !== id);
-                setWatchlist(filtered);
-                triggerToast(`已將 ${symbol} 自觀察清單移除`);
+            // 2. 負責根據 futuresSession (日/夜盤) 過濾並填入圖表
+            useEffect(() => {
+                if (!rawChartData || rawChartData.length === 0 || !candlestickSeriesRef.current) return;
                 
-                if (selectedSymbol === symbol && filtered.length > 0) {
-                    setSelectedSymbol(filtered[0].symbol);
-                } else if (filtered.length === 0) {
-                    setSelectedSymbol(null);
+                let chartData = [...rawChartData];
+                
+                // 台指電子盤切換過濾邏輯
+                if (selectedSymbol === "WTX&" && chartType === "trend") {
+                    chartData = chartData.filter(candle => {
+                        const { hour, minute } = getTaiwanTimeParts(candle.time);
+                        const timeVal = hour * 100 + minute;
+                        if (futuresSession === "day") {
+                            return timeVal >= 845 && timeVal <= 1345;
+                        } else {
+                            // 夜盤: 15:00 ~ 次日 05:00
+                            return timeVal >= 1500 || timeVal <= 500;
+                        }
+                    });
                 }
 
-                if (cloudSyncEnabled && gasUrl) {
-                    syncToCloud(filtered);
+                if (chartType === "trend") {
+                    candlestickSeriesRef.current.setData(chartData.map(c => ({ time: c.time, value: c.value !== undefined ? c.value : c.close })));
+                } else {
+                    candlestickSeriesRef.current.setData(chartData);
                 }
+                chartInstanceRef.current.timeScale().fitContent();
+            }, [rawChartData, futuresSession, chartType, selectedSymbol]);
+
+            const toggleTheme = () => {
+                const next = theme === 'dark' ? 'light' : 'dark';
+                setTheme(next);
+                document.documentElement.classList.toggle('dark', next === 'dark');
             };
 
-            // 投資筆記與存檔
-            const handleNoteChange = (symbol, text) => {
-                setWatchlist(prev => prev.map(item => {
-                    if (item.symbol === symbol) {
-                        return { ...item, note: text };
-                    }
-                    return item;
-                }));
-            };
-
-            const handleNoteBlur = () => {
-                triggerToast("筆記已存檔，正在與雲端同步...");
-                if (cloudSyncEnabled && gasUrl) {
-                    syncToCloud(watchlist);
-                }
-            };
-
-            // 搜尋過濾
             const filteredWatchlist = useMemo(() => {
                 return watchlist.filter(item => {
-                    const matchesSearch = item.symbol.toUpperCase().includes(searchQuery.toUpperCase()) || item.name.includes(searchQuery);
-                    if (!matchesSearch) return false;
+                    if (!item.symbol.toUpperCase().includes(searchQuery.toUpperCase()) && !item.name.includes(searchQuery)) return false;
                     if (activeTab === "stock") return item.category === "stock";
                     if (activeTab === "etf") return item.category === "etf";
                     if (activeTab === "us") return item.category === "us";
@@ -671,814 +591,214 @@
                 });
             }, [watchlist, searchQuery, activeTab]);
 
-            // 強制測試連線
-            const testGasConnection = () => {
-                if (!gasUrl.trim()) {
-                    triggerToast("請先輸入 Apps Script 部署 URL");
-                    return;
-                }
-                setSyncLoading(true);
-                
-                const cacheBuster = `_t=${Date.now()}`;
-                const finalUrl = gasUrl.includes('?') ? `${gasUrl}&${cacheBuster}` : `${gasUrl}?${cacheBuster}`;
-
-                fetch(finalUrl, { 
-                    method: "GET", 
-                    mode: "cors",
-                    cache: "no-store"
-                })
-                    .then(response => {
-                        if (response.ok) {
-                            return response.json();
-                        }
-                        throw new Error("HTTP error");
-                    })
-                    .then(data => {
-                        setCloudConnected(true);
-                        setLoadError(false);
-                        triggerToast("🎉 雲端連線測試成功！已自動校準台股即時價格。");
-                        if (data && data.watchlist) {
-                            setWatchlist(data.watchlist);
-                        }
-                    })
-                    .catch(() => {
-                        triggerToast("☁️ 正在連線至雲端試算表 API...");
-                        loadDataFromCloud();
-                    })
-                    .finally(() => {
-                        setSyncLoading(false);
-                    });
-            };
-
             const activeStockInfo = useMemo(() => {
-                if (selectedSymbol === "^TWII") {
-                    return { symbol: "^TWII", name: "加權指數", category: "index", quote: indexQuotes.twii };
-                }
-                if (selectedSymbol === "^TWOII") {
-                    return { symbol: "^TWOII", name: "櫃買指數", category: "index", quote: indexQuotes.twoii };
-                }
-                if (selectedSymbol === "WTX&") {
-                    return { symbol: "WTX&", name: "台指電子盤", category: "index", quote: indexQuotes.wtx };
-                }
+                if (selectedSymbol === "^TWII") return { symbol: "^TWII", name: "加權指數", category: "index", quote: indexQuotes.twii };
+                if (selectedSymbol === "^TWOII") return { symbol: "^TWOII", name: "櫃買指數", category: "index", quote: indexQuotes.twoii };
+                if (selectedSymbol === "WTX&") return { symbol: "WTX&", name: "台指電子盤", category: "index", quote: indexQuotes.wtx };
                 return watchlist.find(item => item.symbol === selectedSymbol);
             }, [selectedSymbol, watchlist, indexQuotes]);
 
-            const selectedQuote = useMemo(() => {
-                if (!activeStockInfo) return null;
-                if (selectedSymbol === "^TWII") return indexQuotes.twii;
-                if (selectedSymbol === "^TWOII") return indexQuotes.twoii;
-                if (selectedSymbol === "WTX&") return indexQuotes.wtx;
-                return activeStockInfo.quote;
-            }, [activeStockInfo, selectedSymbol, indexQuotes]);
+            const selectedQuote = activeStockInfo?.quote;
 
-            const renderIndexCards = () => {
-                const cards = [
-                    { symbol: "^TWII", name: "加權指數", quote: indexQuotes.twii },
-                    { symbol: "^TWOII", name: "櫃買指數", quote: indexQuotes.twoii },
-                    { symbol: "WTX&", name: "台指電子盤", quote: indexQuotes.wtx }
-                ];
-
-                return (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                        {cards.map(card => {
-                            const q = card.quote || {};
-                            const isActive = selectedSymbol === card.symbol;
-                            const isUp = q.change >= 0;
-                            const changeColor = isUp ? 'text-upRed' : 'text-downGreen';
-                            const arrow = isUp ? '▲' : '▼';
-                            
-                            return (
-                                <div 
-                                    key={card.symbol}
-                                    onClick={() => {
-                                        setSelectedSymbol(card.symbol);
-                                        setChartType("trend");
-                                    }}
-                                    className={`relative p-4 rounded-xl cursor-pointer transition-all duration-200 border bg-white dark:bg-slate-800 hover:shadow-md ${
-                                        isActive 
-                                            ? 'border-indigo-500 ring-2 ring-indigo-500/20 dark:border-emerald-500 dark:ring-emerald-500/20 shadow-sm' 
-                                            : 'border-slate-200 dark:border-slate-700/60'
-                                    }`}
-                                >
-                                    <div className="text-xs font-bold text-slate-400 dark:text-slate-400">
-                                        {card.name}
-                                    </div>
-                                    <div className="text-xl md:text-2xl font-black font-mono tracking-tight text-slate-800 dark:text-white mt-1">
-                                        {safeToFixed(q.price, getDecimals(card.symbol))}
-                                    </div>
-                                    <div className={`text-xs md:text-sm font-bold flex items-center mt-1 ${changeColor}`}>
-                                        <span className="mr-0.5">{arrow}</span>
-                                        <span>{safeToFixed(Math.abs(q.change), getDecimals(card.symbol))} ({safePercent(q.changePercent)})</span>
-                                    </div>
-                                    {isActive && (
-                                        <div className="absolute bottom-0 left-0 right-0 h-1 bg-indigo-500 dark:bg-emerald-500 rounded-b-xl" />
-                                    )}
-                                </div>
-                            );
-                        })}
-                    </div>
-                );
+            const handleQuickAdd = (sym, name) => {
+                setNewSymbol(sym);
+                setNewNamePreview(name);
+                setNewCategory('us');
             };
 
             return (
-                <div className="flex flex-col h-screen min-h-0 bg-slate-50 dark:bg-darkBg overflow-hidden">
-                    
-                    {/* === 1. 頂部導覽列 === */}
+                <div className="flex flex-col h-screen min-h-0 bg-slate-50 dark:bg-darkBg overflow-hidden font-sans">
+                    {/* 頂部導覽列 */}
                     <header className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm shrink-0">
                         <div className="flex items-center space-x-3">
-                            <div className="bg-upRed text-white p-1.5 rounded-lg">
-                                <Icons.TrendingUp />
-                            </div>
+                            <div className="bg-indigo-600 text-white p-1.5 rounded-lg shadow-md"><Icons.TrendingUp /></div>
                             <div>
                                 <h1 className="text-xl font-bold tracking-tight text-slate-800 dark:text-white">台股報價自選面板 Pro</h1>
-                                <p className="text-xs text-slate-500 dark:text-slate-400">Yahoo API 實時對接 • Google 雲端雙向同步</p>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 font-semibold">Yahoo API 快取穿透 • 台指電子盤</p>
                             </div>
                         </div>
-
-
-
-                        <div className="flex items-center space-x-3">
-                            <button 
-                                onClick={loadDataFromCloud}
-                                className={`p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition ${syncLoading ? 'opacity-50 pointer-events-none' : ''}`}
-                                title="即時刷新價格"
-                            >
-                                <Icons.Refresh />
-                            </button>
-                            <button 
-                                onClick={toggleTheme}
-                                className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition"
-                                title="切換主題"
-                            >
-                                {theme === 'dark' ? <Icons.Sun /> : <Icons.Moon />}
-                            </button>
-                            <button 
-                                onClick={() => setActiveTab("settings")}
-                                className={`p-2.5 rounded-lg transition flex items-center space-x-1 ${activeTab === 'settings' ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
-                                title="同步設定"
-                            >
-                                <Icons.Cloud connected={cloudConnected} />
-                                <span className="hidden sm:inline text-xs font-semibold">雲端設定</span>
-                            </button>
-                            <button 
-                                onClick={() => setShowAddModal(true)}
-                                className="flex items-center space-x-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md hover:shadow-lg transition"
-                            >
-                                <Icons.Plus />
-                                <span>新增自選</span>
+                        <div className="flex items-center space-x-2 md:space-x-3">
+                            <button onClick={loadDataFromCloud} className={`p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition ${syncLoading?'animate-spin text-indigo-500':''}`} title="強制更新"><Icons.Refresh /></button>
+                            <button onClick={toggleTheme} className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition" title="切換主題">{theme === 'dark' ? <Icons.Sun /> : <Icons.Moon />}</button>
+                            <button onClick={() => setShowAddModal(true)} className="flex items-center space-x-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md transition">
+                                <Icons.Plus /><span>新增標的</span>
                             </button>
                         </div>
                     </header>
 
-                    {/* === 1.5 指數行情即時列 === */}
-                    <div className="flex items-center justify-start md:justify-center space-x-4 md:space-x-8 px-6 py-2.5 bg-slate-100 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-xs shrink-0 overflow-x-auto no-scrollbar">
-                        <div className="flex items-center space-x-2 shrink-0">
-                            <span className="font-bold text-slate-500 dark:text-slate-400">加權指數:</span>
-                            <span className="font-black text-slate-800 dark:text-slate-100 font-mono">
-                                {indexQuotes.twii.price ? indexQuotes.twii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
-                            </span>
-                            {indexQuotes.twii.price !== null && indexQuotes.twii.price !== undefined && indexQuotes.twii.change !== null && indexQuotes.twii.change !== undefined && (
-                                <span className={`font-bold flex items-center font-mono ${indexQuotes.twii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                    {indexQuotes.twii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twii.change))} ({safePercent(indexQuotes.twii.changePercent)})
-                                </span>
-                            )}
-                        </div>
-                        <div className="w-[1px] h-3 bg-slate-300 dark:bg-slate-700 shrink-0"></div>
-                        <div className="flex items-center space-x-2 shrink-0">
-                            <span className="font-bold text-slate-500 dark:text-slate-400">櫃買指數:</span>
-                            <span className="font-black text-slate-800 dark:text-slate-100 font-mono">
-                                {indexQuotes.twoii.price ? indexQuotes.twoii.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
-                            </span>
-                            {indexQuotes.twoii.price !== null && indexQuotes.twoii.price !== undefined && indexQuotes.twoii.change !== null && indexQuotes.twoii.change !== undefined && (
-                                <span className={`font-bold flex items-center font-mono ${indexQuotes.twoii.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                    {indexQuotes.twoii.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.twoii.change))} ({safePercent(indexQuotes.twoii.changePercent)})
-                                </span>
-                            )}
-                        </div>
-                        <div className="w-[1px] h-3 bg-slate-300 dark:bg-slate-700 shrink-0"></div>
-                        <div className="flex items-center space-x-2 shrink-0">
-                            <span className="font-bold text-slate-500 dark:text-slate-400">台指電子盤:</span>
-                            <span className="font-black text-slate-800 dark:text-slate-100 font-mono">
-                                {indexQuotes.wtx && indexQuotes.wtx.price ? indexQuotes.wtx.price.toLocaleString(undefined, {maximumFractionDigits:2}) : (loadError ? "連線失敗" : "連線中...")}
-                            </span>
-                            {indexQuotes.wtx && indexQuotes.wtx.price !== null && indexQuotes.wtx.price !== undefined && indexQuotes.wtx.change !== null && indexQuotes.wtx.change !== undefined && (
-                                <span className={`font-bold flex items-center font-mono ${indexQuotes.wtx.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                    {indexQuotes.wtx.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(indexQuotes.wtx.change))} ({safePercent(indexQuotes.wtx.changePercent)})
-                                </span>
-                            )}
-                        </div>
+                    {/* 大盤走勢橫幅 */}
+                    <div className="flex items-center space-x-4 md:space-x-8 px-6 py-2.5 bg-slate-100 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-xs shrink-0 overflow-x-auto no-scrollbar">
+                        {['twii', 'twoii', 'wtx'].map((idxType, i) => {
+                            const q = indexQuotes[idxType];
+                            const name = idxType === 'twii' ? '加權指數' : idxType === 'twoii' ? '櫃買指數' : '台指電子盤';
+                            return (
+                                <React.Fragment key={idxType}>
+                                    <div className="flex items-center space-x-2 shrink-0 cursor-pointer" onClick={() => { setSelectedSymbol(idxType === 'wtx' ? 'WTX&' : `^${idxType.toUpperCase()}`); setChartType('trend'); }}>
+                                        <span className="font-bold text-slate-500 dark:text-slate-400">{name}:</span>
+                                        <span className="font-black text-slate-800 dark:text-slate-100 font-mono">{q.price ? q.price.toLocaleString() : "..."}</span>
+                                        {q.change !== undefined && (
+                                            <span className={`font-bold font-mono ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                {q.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(q.change))}
+                                            </span>
+                                        )}
+                                    </div>
+                                    {i < 2 && <div className="w-[1px] h-3 bg-slate-300 dark:bg-slate-700 shrink-0"></div>}
+                                </React.Fragment>
+                            )
+                        })}
                     </div>
 
-                    {/* === 2. 主版面區塊 === */}
                     <main className="flex flex-col lg:flex-row flex-1 min-h-0">
-                        
-                        {/* 左側自選清單欄位 */}
+                        {/* 左側自選列表 */}
                         <section className="w-full lg:w-[420px] border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col min-h-0">
-                            {/* 搜尋條 */}
                             <div className="p-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
                                 <div className="relative">
-                                    <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-slate-400">
-                                        <Icons.Search />
-                                    </span>
-                                    <input 
-                                        type="text"
-                                        placeholder="輸入代號、名稱搜尋觀察股..."
-                                        value={searchQuery}
-                                        onChange={(e) => setSearchQuery(e.target.value)}
-                                        className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-800 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                                    />
+                                    <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400"><Icons.Search /></span>
+                                    <input type="text" placeholder="搜尋代號或名稱..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 bg-transparent" />
                                 </div>
                             </div>
 
-                            {/* 分類 Tab 切換 */}
                             <div className="flex border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 p-1.5 shrink-0">
-                                <button 
-                                    onClick={() => setActiveTab("all")}
-                                    className={`flex-1 py-2 text-xs font-semibold rounded-md transition ${activeTab === "all" ? "bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm" : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100"}`}
-                                >
-                                    全部 ({watchlist.length})
-                                </button>
-                                <button 
-                                    onClick={() => setActiveTab("stock")}
-                                    className={`flex-1 py-2 text-xs font-semibold rounded-md transition ${activeTab === "stock" ? "bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm" : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100"}`}
-                                >
-                                    個股 ({watchlist.filter(x => x.category === "stock").length})
-                                </button>
-                                <button 
-                                    onClick={() => setActiveTab("etf")}
-                                    className={`flex-1 py-2 text-xs font-semibold rounded-md transition ${activeTab === "etf" ? "bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm" : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100"}`}
-                                >
-                                    ETF ({watchlist.filter(x => x.category === "etf").length})
-                                </button>
-                                <button 
-                                    onClick={() => setActiveTab("us")}
-                                    className={`flex-1 py-2 text-xs font-semibold rounded-md transition ${activeTab === "us" ? "bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm" : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100"}`}
-                                >
-                                    美股 & ADR ({watchlist.filter(x => x.category === "us").length})
-                                </button>
+                                {[{id:'all', label:'全部'}, {id:'stock', label:'個股'}, {id:'etf', label:'ETF'}, {id:'us', label:'美股&ADR'}].map(tab => (
+                                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition ${activeTab === tab.id ? "bg-white dark:bg-slate-800 text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"}`}>
+                                        {tab.label}
+                                    </button>
+                                ))}
                             </div>
 
-                            {/* 自選清單列表 */}
                             <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 no-scrollbar">
-                                {filteredWatchlist.length === 0 ? (
-                                    <div className="p-8 text-center text-slate-400 dark:text-slate-500">
-                                        <p className="text-sm">觀察清單空空如也 📈</p>
-                                        <p className="text-xs mt-1">點擊右上角新增自選</p>
-                                    </div>
-                                ) : (
-                                    filteredWatchlist.map(item => {
-                                        const q = item.quote || {};
-                                        const isActive = item.symbol === selectedSymbol;
-                                        const flash = flashStates[item.symbol];
-                                        const flashClass = flash === 'up' ? 'flash-up' : flash === 'down' ? 'flash-down' : '';
+                                {filteredWatchlist.map(item => {
+                                    const q = item.quote || {};
+                                    const isActive = item.symbol === selectedSymbol;
+                                    const flash = flashStates[item.symbol];
+                                    const flashClass = flash === 'up' ? 'flash-up' : flash === 'down' ? 'flash-down' : '';
 
-                                        return (
-                                            <div 
-                                                key={item.id}
-                                                onClick={() => setSelectedSymbol(item.symbol)}
-                                                className={`group flex items-center justify-between p-4 cursor-pointer transition ${isActive ? 'bg-indigo-50/60 dark:bg-slate-800/80 border-l-4 border-indigo-600' : 'hover:bg-slate-50 dark:hover:bg-slate-800/30'} ${flashClass}`}
-                                            >
-                                                <div className="flex items-center space-x-3 min-w-0">
-                                                    <div>
-                                                        <div className="flex items-center space-x-1.5">
-                                                            <span className="font-bold text-sm tracking-wide text-slate-800 dark:text-white">{item.symbol}</span>
-                                                            <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${
-                                                                item.category === "etf" 
-                                                                    ? "bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300" 
-                                                                    : item.category === "us"
-                                                                        ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400"
-                                                                        : "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-400"
-                                                            }`}>
-                                                                {item.category === "etf" ? "ETF" : item.category === "us" ? "美股" : "個股"}
-                                                            </span>
-                                                        </div>
-                                                        <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5 max-w-[150px]">{item.name}</div>
-                                                    </div>
+                                    return (
+                                        <div key={item.id} onClick={() => setSelectedSymbol(item.symbol)} className={`group flex items-center justify-between p-4 cursor-pointer transition ${isActive ? 'bg-indigo-50/60 dark:bg-slate-800/80 border-l-4 border-indigo-500' : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'} ${flashClass}`}>
+                                            <div>
+                                                <div className="flex items-center space-x-2">
+                                                    <span className="font-bold text-sm tracking-wide text-slate-800 dark:text-white">{item.symbol}</span>
+                                                    <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${item.category === "us" ? "bg-blue-100 dark:bg-blue-900/40 text-blue-600" : "bg-slate-100 dark:bg-slate-700 text-slate-500"}`}>{item.category.toUpperCase()}</span>
                                                 </div>
-
-                                                <div className="flex items-center space-x-4">
-                                                    <div className="text-right">
-                                                        <div className="text-sm font-extrabold font-mono text-slate-800 dark:text-white">
-                                                            {safeToFixed(q.price)}
-                                                        </div>
-                                                        {q.price !== null && q.price !== undefined && q.change !== null && q.change !== undefined ? (
-                                                            <div className={`text-xs font-bold flex items-center justify-end space-x-1 ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                <span>{q.change >= 0 ? '+' : ''}{safeToFixed(q.change)}</span>
-                                                                <span className="text-[10px]">({safePercent(q.changePercent)})</span>
-                                                            </div>
-                                                        ) : (
-                                                            <div className="text-[10px] text-slate-400">載入中...</div>
-                                                        )}
-                                                    </div>
-                                                    
-                                                    {/* 刪除按鈕 */}
-                                                    <button 
-                                                        onClick={(e) => handleDeleteStock(item.id, item.symbol, e)}
-                                                        className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/40 text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-400 opacity-0 group-hover:opacity-100 transition duration-150"
-                                                        title="移除觀察"
-                                                    >
-                                                        <Icons.Trash />
-                                                    </button>
-                                                </div>
+                                                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{item.name}</div>
                                             </div>
-                                        );
-                                    })
-                                )}
+                                            <div className="text-right">
+                                                <div className="text-sm font-extrabold font-mono">{safeToFixed(q.price)}</div>
+                                                {q.change !== undefined && (
+                                                    <div className={`text-xs font-bold font-mono ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                        {q.change >= 0 ? '+' : ''}{safeToFixed(q.change)} ({safePercent(q.changePercent)})
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
                             </div>
                         </section>
 
-                        {/* 右側詳細資料、K 線圖與筆記區域 */}
-                        <section className="flex-1 bg-slate-50 dark:bg-slate-900/30 flex flex-col min-h-0 overflow-y-auto">
-                            {activeTab === "settings" || loadError ? (
-                                
-                                /* === 3. Google Sheets 雲端設定面板 & 診斷排障助手 === */
-                                <div className="p-6 max-w-4xl mx-auto w-full space-y-6">
-                                    
-                                    {loadError && (
-                                        <div className="bg-red-500/10 border-2 border-red-500/40 text-red-500 rounded-2xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                                            <div className="space-y-1">
-                                                <h4 className="font-bold text-sm">⚠️ 雲端即時行情連線中斷 / 失敗</h4>
-                                                <p className="text-xs opacity-90 leading-relaxed">
-                                                    網頁無法與您的 Google Apps Script 建立跨來源連線（CORS）。這通常與您的 **權限設定** 或 **試算表格式** 有關。
-                                                </p>
-                                            </div>
-                                            <button 
-                                                onClick={loadDataFromCloud}
-                                                className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-xs font-bold rounded-xl transition shrink-0 shadow-md"
-                                            >
-                                                點我重新連線
-                                            </button>
-                                        </div>
-                                    )}
-
-                                    <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-6 md:p-8">
-                                        <div className="flex items-center space-x-3 mb-6">
-                                            <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-lg">
-                                                <Icons.Cloud connected={cloudConnected} />
-                                            </div>
+                        {}
+                        <section className="flex-1 bg-slate-50 dark:bg-slate-900/30 flex flex-col min-h-0 overflow-y-auto p-4 md:p-6 space-y-6">
+                            {activeStockInfo && selectedQuote ? (
+                                <>
+                                    {/* 指標與控制列 */}
+                                    <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 shadow-sm border border-slate-100 dark:border-slate-800">
+                                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-100 dark:border-slate-700/60 pb-4 mb-4">
                                             <div>
-                                                <h2 className="text-lg font-bold text-slate-800 dark:text-white">Google Sheets 雲端連線設定</h2>
-                                                <p className="text-xs text-slate-500">將您的自選清單與操作策略儲存在您個人的 Google 試算表中</p>
-                                            </div>
-                                        </div>
-
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                            {/* 診斷排障助手 */}
-                                            <div className="space-y-4 bg-indigo-50/50 dark:bg-indigo-950/20 p-5 rounded-2xl border border-indigo-100/50 dark:border-indigo-950/40">
-                                                <h3 className="text-sm font-bold text-indigo-600 dark:text-indigo-400 flex items-center space-x-1.5">
-                                                    <span>🔍</span>
-                                                    <span>連線診斷排障助手</span>
-                                                </h3>
-                                                
-                                                <div className="space-y-3.5 text-xs text-slate-600 dark:text-slate-400">
-                                                    <div className="p-3 bg-white dark:bg-slate-900 rounded-xl space-y-1">
-                                                        <span className="font-bold text-[11px] text-slate-400 block">第一步：網址格式驗證</span>
-                                                        {gasUrl && gasUrl.includes("/exec") ? (
-                                                            <span className="text-emerald-500 font-bold flex items-center">🟢 格式正確 (含有 /exec)</span>
-                                                        ) : (
-                                                            <span className="text-red-500 font-bold flex items-center">🔴 錯誤：您的網址不可包含 /dev，必須是 /exec！</span>
-                                                        )}
-                                                    </div>
-
-                                                    <div className="p-3 bg-white dark:bg-slate-900 rounded-xl space-y-2">
-                                                        <span className="font-bold text-[11px] text-slate-400 block">第二步：直連授權測試</span>
-                                                        <p className="text-[11px] text-slate-500">請點選下方連結，在新分頁中直接開啟您的 API：</p>
-                                                        <a 
-                                                            href={gasUrl} 
-                                                            target="_blank" 
-                                                            rel="noopener noreferrer"
-                                                            className="inline-block px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 rounded-lg text-[11px] font-bold transition border border-indigo-200/50"
-                                                        >
-                                                            在新分頁打開 API 網址 🔗
-                                                        </a>
-                                                        <div className="text-[11px] text-slate-500 mt-2 space-y-1 leading-relaxed">
-                                                            <li><strong>顯示 JSON (如: `status: "success"`)</strong> 🟢 代表試算表與程式碼授權完全成功！</li>
-                                                            <li><strong>顯示 Google 登入畫面 / 提示權限不足</strong> 🔴 代表你在部署時，**「誰能存取」** 沒有設成 **「任何人 (Anyone)」**！請重新部署，並將權限改為「任何人」！</li>
-                                                        </div>
-                                                    </div>
-
-                                                    <div className="p-3 bg-white dark:bg-slate-900 rounded-xl space-y-1">
-                                                        <span className="font-bold text-[11px] text-slate-400 block">第三步：重新發布部署</span>
-                                                        <p className="text-[11px] text-slate-500 leading-relaxed">
-                                                            修改權限後，必須點選 **「部署」 &gt; 「管理部署」 &gt; 點擊鉛筆編輯 &gt; 版本選擇「新版本」** 並按下部署。每次修改程式碼，都必須選「新版本」才會有最新變更生效！
-                                                        </p>
-                                                    </div>
+                                                <h2 className="text-2xl font-black text-slate-800 dark:text-white flex items-center space-x-3">
+                                                    <span>{activeStockInfo.name}</span>
+                                                    <span className="text-lg text-slate-400 font-semibold tracking-wider">{activeStockInfo.symbol}</span>
+                                                </h2>
+                                                <div className="flex items-baseline space-x-3 mt-1">
+                                                    <span className="text-3xl font-mono font-black">{safeToFixed(selectedQuote.price, getDecimals(selectedSymbol))}</span>
+                                                    <span className={`text-lg font-bold font-mono ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                        {selectedQuote.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(selectedQuote.change), getDecimals(selectedSymbol))} ({safePercent(selectedQuote.changePercent)})
+                                                    </span>
                                                 </div>
                                             </div>
-
-                                            {/* 連線表單 */}
-                                            <div className="space-y-4 bg-slate-50 dark:bg-slate-800/40 p-4 rounded-xl border border-slate-150 dark:border-slate-700/60">
-                                                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300">連線設定</h3>
-                                                <div className="space-y-2">
-                                                    <label className="text-xs font-semibold text-slate-500">Apps Script 部署 URL</label>
-                                                    <input 
-                                                        type="text"
-                                                        value={gasUrl}
-                                                        onChange={(e) => handleGasUrlChange(e.target.value)}
-                                                        placeholder="https://script.google.com/macros/s/.../exec"
-                                                        className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-xs text-slate-800 dark:text-slate-150 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                                    />
-                                                </div>
-
-                                                <div className="flex items-center space-x-2 py-2">
-                                                    <input 
-                                                        type="checkbox" 
-                                                        id="cloud-toggle"
-                                                        checked={cloudSyncEnabled}
-                                                        onChange={(e) => setCloudSyncEnabled(e.target.checked)}
-                                                        className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500"
-                                                        disabled={!gasUrl}
-                                                    />
-                                                    <label htmlFor="cloud-toggle" className={`text-xs font-semibold ${!gasUrl ? 'text-slate-400 cursor-not-allowed' : 'text-slate-700 dark:text-slate-300 cursor-pointer'}`}>
-                                                        啟用雲端自動上傳與同步
-                                                    </label>
-                                                </div>
-
-                                                <div className="flex space-x-3 pt-2">
-                                                    <button 
-                                                        onClick={testGasConnection}
-                                                        disabled={syncLoading || !gasUrl}
-                                                        className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white text-xs font-bold rounded-lg transition shadow-sm"
-                                                    >
-                                                        {syncLoading ? "正在連線..." : "測試連線並匯入"}
-                                                    </button>
-                                                    <button 
-                                                        onClick={() => syncToCloud(watchlist)}
-                                                        disabled={syncLoading || !gasUrl}
-                                                        className="flex-1 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 disabled:bg-slate-300 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-lg transition"
-                                                    >
-                                                        強制上傳至雲端
-                                                    </button>
-                                                </div>
-
-                                                <div className="text-[11px] text-slate-400 flex items-center justify-between">
-                                                    <span>連線狀態: {cloudConnected ? "🟢 已連線" : "🔴 未連線"}</span>
-                                                    <span>本地資料筆數: {watchlist.length} 筆</span>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div className="mt-6 pt-6 border-t border-slate-200 dark:border-slate-700 text-right">
-                                            <button 
-                                                onClick={() => {
-                                                    setLoadError(false);
-                                                    setActiveTab("all");
-                                                }}
-                                                className="px-5 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-lg transition"
-                                            >
-                                                返回看盤儀表板
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            ) : (
-                                
-                                /* === 4. 看盤主視覺與圖表區域 === */
-                                <div className="p-4 md:p-6 space-y-6">
-                                    {selectedSymbol && activeStockInfo ? (
-                                        <>
-                                            {/* 全域顯示三格指數大字格卡 */}
-                                            {renderIndexCards()}
-
-                                            {/* 即時報價卡片與主數據 (僅在非加權/櫃買/台指期時顯示，即個股/ETF) */}
-                                            {!(selectedSymbol === "^TWII" || selectedSymbol === "^TWOII" || selectedSymbol === "WTX&") && (
-                                                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
-                                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                                                        
-                                                        {/* 左側：代號名稱 */}
-                                                        <div className="flex items-center space-x-3">
-                                                            <div className="h-12 w-12 bg-indigo-50 dark:bg-slate-700 rounded-xl flex items-center justify-center font-black text-indigo-600 dark:text-indigo-400">
-                                                                {selectedSymbol.substring(0,2)}
-                                                            </div>
-                                                            <div>
-                                                                <div className="flex items-center space-x-2">
-                                                                    <h2 className="text-xl font-black text-slate-800 dark:text-white">{selectedSymbol}</h2>
-                                                                    <span className={`px-2 py-0.5 text-xs font-bold rounded-md ${
-                                                                        activeStockInfo.category === "etf" 
-                                                                            ? "bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-300" 
-                                                                            : activeStockInfo.category === "us"
-                                                                                ? "bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-300"
-                                                                                : "bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-300"
-                                                                    }`}>
-                                                                        {activeStockInfo.category === "etf" ? "ETF 基金" : activeStockInfo.category === "us" ? "美股 ADR" : "上市櫃股票"}
-                                                                    </span>
-                                                                </div>
-                                                                <p className="text-sm font-semibold text-slate-500 dark:text-slate-400 mt-0.5">{activeStockInfo.name}</p>
-                                                            </div>
-                                                        </div>
-
-                                                        {/* 中間：最新成交價格 */}
-                                                        <div className="flex items-baseline space-x-4">
-                                                            <div className="text-3xl font-black font-mono tracking-tight text-slate-800 dark:text-white">
-                                                                {safeToFixed(selectedQuote?.price)}
-                                                            </div>
-                                                            {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined && (
-                                                                <div className={`text-base font-bold flex items-center ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                    <span className="mr-1">{selectedQuote.change >= 0 ? '▲' : '▼'}</span>
-                                                                    <span>{safeToFixed(Math.abs(selectedQuote.change))}</span>
-                                                                    <span className="ml-1.5">({safePercent(selectedQuote.changePercent)})</span>
-                                                                </div>
-                                                            )}
-                                                        </div>
-
-                                                        {/* 右側：雲端即時行情指示器 */}
-                                                        <div className="text-xs text-right text-slate-400 dark:text-slate-500">
-                                                            <div className="flex items-center justify-end space-x-1">
-                                                                <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
-                                                                <span className="font-semibold text-slate-600 dark:text-slate-300">Yahoo 實時行情連線</span>
-                                                            </div>
-                                                            <p className="mt-1">每 30 秒自動靜默刷新，或手動強制刷新</p>
-                                                        </div>
-                                                    </div>
-
-                                                    {/* 台灣傳統看盤細部五檔精華區塊 */}
-                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-6 pt-6 border-t border-slate-100 dark:border-slate-700/60">
-                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">開盤價</p>
-                                                            <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                                {safeToFixed(selectedQuote?.open)}
-                                                            </p>
-                                                        </div>
-                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最高價</p>
-                                                            <p className="text-sm font-extrabold text-upRed mt-1 font-mono">
-                                                                {safeToFixed(selectedQuote?.high)}
-                                                            </p>
-                                                        </div>
-                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">最低價</p>
-                                                            <p className="text-sm font-extrabold text-downGreen mt-1 font-mono">
-                                                                {safeToFixed(selectedQuote?.low)}
-                                                            </p>
-                                                        </div>
-                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">昨收價</p>
-                                                            <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                                {selectedQuote && selectedQuote.price !== null && selectedQuote.price !== undefined && selectedQuote.change !== null && selectedQuote.change !== undefined
-                                                                    ? safeToFixed(selectedQuote.price - selectedQuote.change) 
-                                                                    : "—"}
-                                                            </p>
-                                                        </div>
-                                                        <div className="bg-slate-50 dark:bg-slate-900/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800 col-span-2 md:col-span-1">
-                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">今日成交量</p>
-                                                            <p className="text-sm font-extrabold text-slate-700 dark:text-slate-200 mt-1 font-mono">
-                                                                {formatVolume(selectedQuote?.volume, false)}
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {/* 圖表與指標區塊 */}
-                                            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col">
-                                                
-                                                {/* 圖表控制與分時/K線選擇 */}
-                                                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3 mb-4">
-                                                    <div className="flex space-x-6 text-sm font-bold">
-                                                        <button 
-                                                            onClick={() => setChartType("trend")}
-                                                            className={`pb-2 border-b-2 transition ${chartType === "trend" ? 'border-indigo-600 dark:border-emerald-500 text-indigo-600 dark:text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                                                        >
-                                                            走勢
-                                                        </button>
-                                                        <button 
-                                                            onClick={() => setChartType("kline")}
-                                                            className={`pb-2 border-b-2 transition ${chartType === "kline" ? 'border-indigo-600 dark:border-emerald-500 text-indigo-600 dark:text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                                                        >
-                                                            K線
-                                                        </button>
-                                                    </div>
-                                                    
-                                                    {/* 右側切換器 */}
-                                                    {selectedSymbol === "WTX&" && chartType === "trend" && (
-                                                        <div className="flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
-                                                            <button 
-                                                                onClick={() => setFuturesSession("day")}
-                                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${futuresSession === "day" ? 'bg-indigo-600 text-white dark:bg-slate-700 dark:text-slate-100' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                                                            >
-                                                                日盤
-                                                            </button>
-                                                            <button 
-                                                                onClick={() => setFuturesSession("night")}
-                                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${futuresSession === "night" ? 'bg-indigo-600 text-white dark:bg-slate-700 dark:text-slate-100' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                                                            >
-                                                                夜盤
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                    
-                                                    {chartType === "kline" && (
-                                                        <div className="flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
-                                                            {['1M', '3M', '6M'].map(range => (
-                                                                <button 
-                                                                    key={range}
-                                                                    onClick={() => setKlineRange(range)}
-                                                                    className={`px-3 py-1 text-xs font-bold rounded-md transition ${klineRange === range ? 'bg-indigo-600 text-white dark:bg-slate-700 dark:text-slate-100' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                                                                >
-                                                                    {range === '1M' ? '30天' : range === '3M' ? '90天' : '半年'}
-                                                                </button>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                {/* 指標與細部價格 (當選中指數卡片或台指期時，直接在圖表上方顯示) */}
-                                                {(selectedSymbol === "^TWII" || selectedSymbol === "^TWOII" || selectedSymbol === "WTX&") && (
-                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4 py-3 px-4 bg-slate-50 dark:bg-slate-900/40 rounded-xl border border-slate-100 dark:border-slate-800 text-xs font-bold">
-                                                        <div>
-                                                            <span className="text-slate-400 block">開盤</span>
-                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                {safeToFixed(selectedQuote?.open, getDecimals(selectedSymbol))}
-                                                            </span>
-                                                        </div>
-                                                        <div>
-                                                            <span className="text-slate-400 block">最高</span>
-                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                {safeToFixed(selectedQuote?.high, getDecimals(selectedSymbol))}
-                                                            </span>
-                                                        </div>
-                                                        <div>
-                                                            <span className="text-slate-400 block">最低</span>
-                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                {safeToFixed(selectedQuote?.low, getDecimals(selectedSymbol))}
-                                                            </span>
-                                                        </div>
-                                                        <div>
-                                                            <span className="text-slate-400 block">收盤</span>
-                                                            <span className={`text-base font-extrabold font-mono ${selectedQuote?.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                                {safeToFixed(selectedQuote?.price, getDecimals(selectedSymbol))}
-                                                            </span>
-                                                        </div>
-                                                        <div className="col-span-2 md:col-span-1">
-                                                            <span className="text-slate-400 block">成交量</span>
-                                                            <span className="text-base font-extrabold text-slate-700 dark:text-slate-200 font-mono">
-                                                                {formatVolume(selectedQuote?.volume, selectedSymbol === "WTX&")}
-                                                            </span>
-                                                        </div>
+                                            
+                                            {/* 切換工具列 */}
+                                            <div className="flex flex-col items-end space-y-2">
+                                                {selectedSymbol === "WTX&" && chartType === "trend" && (
+                                                    <div className="flex bg-indigo-50 dark:bg-slate-900 p-1 rounded-lg border border-indigo-100 dark:border-slate-700 shadow-inner">
+                                                        <button onClick={() => setFuturesSession("day")} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${futuresSession === "day" ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>☀️ 日盤 (08:45-13:45)</button>
+                                                        <button onClick={() => setFuturesSession("night")} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${futuresSession === "night" ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>🌙 夜盤 (15:00-05:00)</button>
                                                     </div>
                                                 )}
-
-                                                <div className="flex items-center space-x-2 mb-4">
-                                                    <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse"></span>
-                                                    <h4 className="font-bold text-xs text-slate-500 dark:text-slate-400">
-                                                        {selectedSymbol === "WTX&" && chartType === "trend" 
-                                                            ? `台指電子盤 - ${futuresSession === "day" ? "日盤分時走勢" : "即時夜盤分時走勢"}` 
-                                                            : `${activeStockInfo?.name} (${selectedSymbol}) - ${chartType === "trend" ? "當日分時走勢" : "歷史K線走勢"}`}
-                                                        {chartLoading && <span className="text-xs text-indigo-500 font-semibold ml-2">(載入中...)</span>}
-                                                    </h4>
+                                                <div className="flex space-x-4 text-sm font-bold bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
+                                                    <button onClick={() => setChartType("trend")} className={`px-4 py-1.5 rounded-md transition ${chartType === "trend" ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-emerald-400 shadow-sm' : 'text-slate-500'}`}>分時走勢</button>
+                                                    <button onClick={() => setChartType("kline")} className={`px-4 py-1.5 rounded-md transition ${chartType === "kline" ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-emerald-400 shadow-sm' : 'text-slate-500'}`}>日 K 線</button>
                                                 </div>
-
-                                                {/* K線與走勢畫布 */}
-                                                <div ref={chartContainerRef} className="w-full h-[320px] bg-white dark:bg-slate-800 rounded-xl overflow-hidden" />
                                             </div>
-
-                                            {/* 投資筆記編輯欄位 - 只有在自選清單裡的標的才顯示 */}
-                                            {watchlist.some(item => item.symbol === selectedSymbol) && (
-                                                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
-                                                    <div className="flex items-center justify-between mb-3">
-                                                        <h3 className="font-bold text-sm text-slate-800 dark:text-white flex items-center space-x-2">
-                                                            <span className="text-amber-500">✍️</span>
-                                                            <span>自選股操作筆記（滑鼠離開編輯框時將自動上傳存檔）</span>
-                                                        </h3>
-                                                    </div>
-                                                    <textarea 
-                                                        value={activeStockInfo.note || ""}
-                                                        onChange={(e) => handleNoteChange(selectedSymbol, e.target.value)}
-                                                        onBlur={handleNoteBlur}
-                                                        placeholder="在此輸入該觀察股的進出場策略、籌碼分析壓力關卡或季報基本面追蹤筆記..."
-                                                        className="w-full h-32 px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-800 dark:text-slate-150 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                                    />
-                                                </div>
-                                            )}
-                                        </>
-                                    ) : (
-                                        <div className="p-12 text-center text-slate-400">
-                                            請在左側自選名單選擇股票以展示細部 K 線及財報資料 📈
                                         </div>
-                                    )}
-                                </div>
+
+                                        <div className="relative">
+                                            {chartLoading && <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/50 dark:bg-slate-800/50 backdrop-blur-sm rounded-xl"><span className="text-indigo-600 font-bold animate-pulse">載入圖表中...</span></div>}
+                                            <div ref={chartContainerRef} className="w-full h-[360px] rounded-xl overflow-hidden" />
+                                        </div>
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="flex-1 flex items-center justify-center text-slate-400 font-bold">請選擇左側清單標的</div>
                             )}
                         </section>
                     </main>
 
-                    {/* === 5. 新增自選股票對話框 === */}
+                    {}
                     {showAddModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4">
-                            <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl shadow-2xl border border-slate-150 dark:border-slate-700/60 p-6 transform transition-all">
-                                <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-700/60">
-                                    <h3 className="text-base font-bold text-slate-800 dark:text-white">新增台股觀察自選</h3>
-                                    <button 
-                                        onClick={() => setShowAddModal(false)}
-                                        className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg"
-                                    >
-                                        ✕
-                                    </button>
+                            <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl shadow-2xl p-6">
+                                <div className="flex justify-between mb-4 border-b border-slate-100 dark:border-slate-700 pb-2">
+                                    <h3 className="font-bold text-lg text-slate-800 dark:text-white">新增自選標的</h3>
+                                    <button onClick={() => setShowAddModal(false)} className="text-slate-400">✕</button>
                                 </div>
-
-                                <div className="py-4 space-y-4">
-                                    {/* 輸入代號 */}
-                                    <div className="space-y-1.5">
-                                        <label className="text-xs font-bold text-slate-500">股票或 ETF 代號</label>
-                                        <input 
-                                            type="text"
-                                            value={newSymbol}
-                                            onChange={(e) => setNewSymbol(e.target.value)}
-                                            placeholder="請輸入代號 (例如: 2330, 0050)"
-                                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-800 dark:text-slate-150 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                        />
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500">輸入代號</label>
+                                        <input type="text" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value.toUpperCase())} placeholder="例: 2330, TSM, AAPL" className="w-full px-4 py-2 mt-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-indigo-500" />
                                     </div>
-
-                                    {/* 自動偵測預覽 */}
-                                    {newNamePreview && (
-                                        <div className="p-3 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                                            <div className="flex flex-col">
-                                                <span className="text-xs text-slate-400">偵測代號</span>
-                                                <span className="text-sm font-bold text-slate-800 dark:text-white">{newNamePreview}</span>
-                                            </div>
-                                            <div className="flex flex-col items-end">
-                                                <span className="text-xs text-slate-400">建議分類</span>
-                                                <span className={`px-2 py-0.5 text-[10px] font-bold rounded mt-1 ${
-                                                    newCategory === 'etf' 
-                                                        ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700' 
-                                                        : newCategory === 'us'
-                                                            ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700'
-                                                            : 'bg-red-100 dark:bg-red-900/40 text-red-700'
-                                                }`}>
-                                                    {newCategory === 'etf' ? 'ETF 基金' : newCategory === 'us' ? '美股 & ADR' : '一般個股'}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* 分類確認 */}
-                                    <div className="space-y-1.5">
-                                        <label className="text-xs font-bold text-slate-500">投資商品分類</label>
-                                        <select 
-                                            value={newCategory}
-                                            onChange={(e) => setNewCategory(e.target.value)}
-                                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-800 dark:text-slate-150 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                        >
-                                            <option value="stock">一般個股 (股票)</option>
-                                            <option value="etf">指數型/高股息基金 (ETF)</option>
-                                            <option value="us">美股熱門 & ADR</option>
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500">市場分類</label>
+                                        <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="w-full px-4 py-2 mt-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-indigo-500">
+                                            <option value="stock">台股個股</option>
+                                            <option value="etf">ETF 基金</option>
+                                            <option value="us">美股 & ADR</option>
                                         </select>
                                     </div>
-
-                                    {addError && (
-                                        <div className="text-xs text-red-500 font-semibold bg-red-50 dark:bg-red-950/20 p-2 rounded-lg">
-                                            ⚠️ {addError}
+                                    
+                                    {/* 美股快捷加入區塊 */}
+                                    <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-100 dark:border-blue-900/50">
+                                        <span className="text-xs font-bold text-blue-600 dark:text-blue-400 block mb-2">🔥 熱門國際標的快速加入：</span>
+                                        <div className="flex flex-wrap gap-2">
+                                            {US_POPULAR_STOCKS.map(s => (
+                                                <button key={s.sym} onClick={() => handleQuickAdd(s.sym, s.name)} className="px-2 py-1 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold rounded shadow-sm border border-slate-200 dark:border-slate-700 hover:bg-indigo-50 hover:text-indigo-600 transition">
+                                                    {s.sym}
+                                                </button>
+                                            ))}
                                         </div>
-                                    )}
-                                </div>
-
-                                <div className="pt-4 border-t border-slate-100 dark:border-slate-700/60 flex space-x-3">
-                                    <button 
-                                        onClick={() => setShowAddModal(false)}
-                                        className="flex-1 py-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-sm font-bold rounded-xl transition"
-                                    >
-                                        取消
-                                    </button>
-                                    <button 
-                                        onClick={handleAddStockSubmit}
-                                        className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-xl transition shadow-md"
-                                    >
-                                        確定加入
-                                    </button>
+                                    </div>
+                                    
+                                    <button onClick={() => {
+                                        if(!newSymbol) return;
+                                        setWatchlist([...watchlist, { id: Date.now().toString(), symbol: newSymbol, name: newNamePreview || newSymbol, category: newCategory, quote: {} }]);
+                                        setShowAddModal(false);
+                                        triggerToast(`已加入標的: ${newSymbol}`);
+                                        setNewSymbol("");
+                                    }} className="w-full py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition">確定新增</button>
                                 </div>
                             </div>
                         </div>
                     )}
-
-                    {/* === 6. Toast 提示 === */}
+                    
                     {toastMsg && (
-                        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 dark:bg-slate-800 text-white px-5 py-3 rounded-xl shadow-2xl border border-slate-700 flex items-center space-x-2 animate-bounce">
-                            <span className="text-indigo-400">💡</span>
-                            <span className="text-xs font-bold">{toastMsg}</span>
+                        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl font-bold text-sm flex items-center space-x-2 animate-bounce">
+                            <span>💡</span><span>{toastMsg}</span>
                         </div>
                     )}
                 </div>
             );
         }
 
-        // 常規台股清單對照組
-        const MOCK_STOCK_REGISTRY = {
-            "2330": { name: "台積電", price: 1045, category: "stock" },
-            "2317": { name: "鴻海", price: 212.5, category: "stock" },
-            "2454": { name: "聯發科", price: 1350, category: "stock" },
-            "0050": { name: "元大台灣50", price: 198.4, category: "etf" },
-            "0056": { name: "元大高股息", price: 38.65, category: "etf" },
-            "00878": { name: "國泰永續高股息", price: 22.90, category: "etf" },
-            "00919": { name: "群益台灣精選高息", price: 25.10, category: "etf" },
-            "00940": { name: "元大台灣價值高息", price: 9.65, category: "etf" },
-            "WTX&": { name: "台指期近月", price: 47000, category: "stock" },
-            "TSM": { name: "台積電 ADR", price: 172.5, category: "us" },
-            "NVDA": { name: "輝達", price: 127.4, category: "us" },
-            "AAPL": { name: "蘋果", price: 214.3, category: "us" },
-            "QQQ": { name: "納斯達克 100 ETF", price: 478.2, category: "us" }
-        };
-
-        const rootElement = document.getElementById('root');
-        const root = ReactDOM.createRoot(rootElement);
+        const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
     </script>
 </body>
