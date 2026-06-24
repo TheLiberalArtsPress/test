@@ -1,299 +1,9 @@
-<!-- 👇 👇 👇 請將以下 Script 區塊內的程式碼複製並覆蓋到您的 Google Apps Script (Code.gs) 中 👇 👇 👇 -->
-<script type="text/plain" id="gas-backend-code">
-function triggerPermission() {
-  UrlFetchApp.fetch("https://www.google.com");
-}
-
-/**
- * 台股報價自選面板 Pro - 企業級 Google Apps Script 行情 API (日盤即時快取穿透版)
- */
-
-function getWatchlistSheet() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (!ss) {
-    ss = SpreadsheetApp.openById("191uCR6yk4UEj8bUZikB1AR786VFIJ2SdER7cDTXrwY8");
-  }
-  var sheet = ss.getSheetByName("Watchlist");
-  if (!sheet) {
-    sheet = ss.insertSheet("Watchlist");
-    sheet.appendRow(["ID", "Symbol", "Name", "Category", "Note"]);
-    sheet.appendRow(["1", "2330", "台積電", "stock", "先進製程領先，長線看好。"]);
-    sheet.appendRow(["2", "2317", "鴻海", "stock", "AI 伺服器主要受益者。"]);
-    sheet.appendRow(["3", "0050", "元大台灣50", "etf", "台股大盤代表，適合定期定額。"]);
-    sheet.appendRow(["4", "00878", "國泰永續高股息", "etf", "季配息，波動度穩健。"]);
-    sheet.appendRow(["5", "WTX&", "台指期近月", "stock", "大盤期貨（含夜盤與即時行情）。"]);
-    sheet.appendRow(["6", "TSM", "台積電 ADR", "us", "TSMC 美股存託憑證。"]);
-    sheet.appendRow(["7", "NVDA", "輝達", "us", "全球 AI 晶片龍頭。"]);
-    sheet.appendRow(["8", "AAPL", "蘋果", "us", "消費性電子與軟體生態系巨擘。"]);
-    sheet.appendRow(["9", "QQQ", "納斯達克 100 ETF", "us", "追蹤納斯達克 100 指數之 ETF。"]);
-  }
-  return sheet;
-}
-
-function normalizeSymbol(symbol) {
-  if (symbol === undefined || symbol === null) return "";
-  var cleanSymbol = symbol.trim().toUpperCase();
-  if (/^\d+$/.test(cleanSymbol)) {
-    var num = parseInt(cleanSymbol, 10);
-    if (num < 100) cleanSymbol = ("0000" + cleanSymbol).slice(-4);
-    else if (num < 1000) cleanSymbol = ("00000" + cleanSymbol).slice(-5);
-  }
-  if (cleanSymbol === "TWII" || cleanSymbol === "^TWII") return "^TWII";
-  if (cleanSymbol === "TWOII" || cleanSymbol === "^TWOII") return "^TWOII";
-  if (cleanSymbol === "WTX&" || cleanSymbol === "WTXP&" || cleanSymbol === "WTX" || cleanSymbol === "WTXP") return "IX0126.TW";
-  return cleanSymbol;
-}
-
-function getActiveSgxFuturesSymbol() {
-  var date = new Date();
-  var year = date.getFullYear() % 100;
-  var month = date.getMonth();
-  var monthCodes = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z'];
-  return "TWN-" + monthCodes[month] + year + ".SI";
-}
-
-function getSgxScaledIntradayData(sgxSymbol) {
-  var cacheBuster = new Date().getTime();
-  var url = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(sgxSymbol) + "?range=1d&interval=1m&_t=" + cacheBuster;
-  var twiiQuote = fetchLiveQuoteFromUrl("^TWII");
-  var basePrice = twiiQuote ? twiiQuote.price : 47000;
-  
-  try {
-    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    if (response.getResponseCode() !== 200) return [];
-    var json = JSON.parse(response.getContentText());
-    if (json.chart && json.chart.result && json.chart.result.length > 0) {
-      var result = json.chart.result[0];
-      var timestamps = result.timestamp || [];
-      var indicators = result.indicators.quote[0];
-      var closes = indicators.close || [];
-      var firstValidClose = null;
-      for (var k = 0; k < closes.length; k++) {
-        if (closes[k] !== null && closes[k] !== undefined) {
-          firstValidClose = closes[k]; break;
-        }
-      }
-      if (!firstValidClose) return [];
-      var scale = basePrice / firstValidClose;
-      var data = [];
-      for (var i = 0; i < timestamps.length; i++) {
-        if (closes[i] === null || closes[i] === undefined) continue;
-        data.push({
-          time: timestamps[i],
-          value: parseFloat((closes[i] * scale).toFixed(0)),
-          close: parseFloat((closes[i] * scale).toFixed(0))
-        });
-      }
-      return data;
-    }
-  } catch (e) {}
-  return [];
-}
-
-function getTaiexFuturesLiveQuote() {
-  var sgxSymbol = getActiveSgxFuturesSymbol();
-  var sgxQuote = fetchLiveQuoteFromUrl(sgxSymbol);
-  var twiiQuote = fetchLiveQuoteFromUrl("^TWII");
-  
-  if (!sgxQuote || !twiiQuote) {
-    var twiiVal = fetchLiveQuoteFromUrl("^TWII");
-    if (twiiVal) return twiiVal;
-    var ixVal = fetchLiveQuoteFromUrl("IX0126.TW");
-    if (ixVal) {
-      var scale = ixVal.price < 35000 ? 1.815 : 1.0;
-      return {
-        price: parseFloat((ixVal.price * scale).toFixed(0)),
-        change: parseFloat((ixVal.change * scale).toFixed(0)),
-        changePercent: ixVal.changePercent,
-        open: parseFloat((ixVal.open * scale).toFixed(0)),
-        high: parseFloat((ixVal.high * scale).toFixed(0)),
-        low: parseFloat((ixVal.low * scale).toFixed(0)),
-        volume: ixVal.volume
-      };
-    }
-    return null;
-  }
-  
-  var changePercent = sgxQuote.changePercent;
-  var price = twiiQuote.price * (1 + changePercent);
-  return {
-    price: parseFloat(price.toFixed(0)),
-    change: parseFloat((price - twiiQuote.price).toFixed(0)),
-    changePercent: parseFloat(changePercent.toFixed(4)),
-    open: parseFloat((twiiQuote.open * (1 + changePercent)).toFixed(0)),
-    high: parseFloat((twiiQuote.high * (1 + changePercent)).toFixed(0)),
-    low: parseFloat((twiiQuote.low * (1 + changePercent)).toFixed(0)),
-    volume: sgxQuote.volume
-  };
-}
-
-function resolveTickerSuffix(cleanSymbol) {
-  if (cleanSymbol.indexOf(".") !== -1 || cleanSymbol === "^TWII" || cleanSymbol === "^TWOII") return "";
-  var cache = CacheService.getScriptCache();
-  var cachedSuffix = cache.get("suffix_v4_" + cleanSymbol);
-  if (cachedSuffix) return cachedSuffix;
-
-  try {
-    var urlTW = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(cleanSymbol + ".TW") + "?interval=1m&range=1d";
-    var res = UrlFetchApp.fetch(urlTW, { muteHttpExceptions: true });
-    if (res.getResponseCode() === 200) {
-      cache.put("suffix_v4_" + cleanSymbol, ".TW", 21600);
-      return ".TW";
-    } else if (res.getResponseCode() === 404) {
-      cache.put("suffix_v4_" + cleanSymbol, ".TWO", 21600);
-      return ".TWO";
-    }
-  } catch (e) {}
-  return ".TWO";
-}
-
-function fetchLiveQuoteFromUrl(resolvedTicker) {
-  var cacheBuster = new Date().getTime(); // 強制穿透快取，確保日盤即時跳動
-  var url = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(resolvedTicker) + "?interval=1m&range=1d&_t=" + cacheBuster;
-  
-  try {
-    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    if (response.getResponseCode() !== 200) return null;
-    var json = JSON.parse(response.getContentText());
-    if (!json.chart || !json.chart.result || json.chart.result.length === 0) return null;
-
-    var result = json.chart.result[0];
-    var meta = result.meta;
-    var price = meta.regularMarketPrice;
-    var prevClose = meta.chartPreviousClose || meta.previousClose;
-    
-    if (price === null || price === undefined) {
-      var closes = (result.indicators.quote[0] && result.indicators.quote[0].close) || [];
-      var validCloses = closes.filter(function(x) { return x !== null; });
-      if (validCloses.length > 0) price = validCloses[validCloses.length - 1];
-    }
-    
-    if (price === null || price === undefined || isNaN(price)) return null;
-
-    var change = prevClose ? price - prevClose : 0;
-    var changePercent = prevClose ? change / prevClose : 0;
-
-    return {
-      price: parseFloat(price.toFixed(2)),
-      change: parseFloat(change.toFixed(2)),
-      changePercent: parseFloat(changePercent.toFixed(4)),
-      open: parseFloat((meta.regularMarketOpen || price).toFixed(2)),
-      high: parseFloat(price.toFixed(2)), // 簡化版，以price為基準
-      low: parseFloat(price.toFixed(2)),
-      volume: 0
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
-function getLiveQuote(ticker) {
-  if (!ticker) return null;
-  var cleanSymbol = normalizeSymbol(ticker);
-  if (cleanSymbol === "IX0126.TW") return getTaiexFuturesLiveQuote();
-  if (/^[A-Z]+$/.test(cleanSymbol)) return fetchLiveQuoteFromUrl(cleanSymbol);
-  if (cleanSymbol.indexOf(".") !== -1 || cleanSymbol === "^TWII" || cleanSymbol === "^TWOII") return fetchLiveQuoteFromUrl(cleanSymbol);
-  
-  var suffix = resolveTickerSuffix(cleanSymbol);
-  return fetchLiveQuoteFromUrl(cleanSymbol + suffix);
-}
-
-function getHistoricalData(symbol, range) {
-  var ticker = resolveTickerSuffix(normalizeSymbol(symbol)) ? normalizeSymbol(symbol) + resolveTickerSuffix(normalizeSymbol(symbol)) : normalizeSymbol(symbol);
-  if (ticker === "IX0126.TW" && range === "1d") return getSgxScaledIntradayData(getActiveSgxFuturesSymbol());
-
-  var interval = range === "1d" ? "1m" : "1d";
-  var yahooRange = range === "1d" ? "1d" : (range === "1m" || range === "1mo" ? "1mo" : "3mo");
-  var cacheBuster = new Date().getTime();
-  
-  var url = "https://query2.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(ticker) + "?range=" + yahooRange + "&interval=" + interval + "&_t=" + cacheBuster;
-  try {
-    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    if (response.getResponseCode() !== 200) return [];
-    var json = JSON.parse(response.getContentText());
-    if (json.chart && json.chart.result && json.chart.result.length > 0) {
-      var result = json.chart.result[0];
-      var timestamps = result.timestamp || [];
-      var indicators = result.indicators.quote[0];
-      var candles = [];
-      var scale = 1.0;
-      
-      for (var i = 0; i < timestamps.length; i++) {
-        if (indicators.open[i] === null) continue;
-        candles.push({
-          time: range === "1d" ? timestamps[i] : new Date(timestamps[i]*1000).toISOString().split('T')[0],
-          open: parseFloat((indicators.open[i] * scale).toFixed(2)),
-          high: parseFloat((indicators.high[i] * scale).toFixed(2)),
-          low: parseFloat((indicators.low[i] * scale).toFixed(2)),
-          close: parseFloat((indicators.close[i] * scale).toFixed(2)),
-          value: parseFloat((indicators.close[i] * scale).toFixed(2))
-        });
-      }
-      return candles;
-    }
-  } catch (e) {}
-  return [];
-}
-
-function loadWatchlistAndQuotes() {
-  var sheet = getWatchlistSheet();
-  var rows = sheet.getDataRange().getValues();
-  var watchlist = [];
-  for (var i = 1; i < rows.length; i++) {
-    var symbol = String(rows[i][1]).trim();
-    if (!symbol) continue;
-    var cleanSym = symbol.toUpperCase();
-    var category = String(rows[i][3]);
-    if (/^00/.test(cleanSym)) category = "etf";
-    if (/^[A-Z]+$/.test(cleanSym)) category = "us";
-
-    watchlist.push({
-      id: String(rows[i][0]),
-      symbol: symbol,
-      name: String(rows[i][2]),
-      category: category,
-      note: String(rows[i][4]),
-      quote: getLiveQuote(symbol) || {}
-    });
-  }
-  return {
-    status: "success",
-    watchlist: watchlist,
-    indices: {
-      twii: getLiveQuote("^TWII") || {},
-      twoii: getLiveQuote("^TWOII") || {},
-      wtx: getLiveQuote("WTX&") || {}
-    }
-  };
-}
-
-function doGet(e) {
-  if (e.parameter.action === "getChart") {
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "success", candles: getHistoricalData(e.parameter.symbol, e.parameter.range || "3m")
-    })).setMimeType(ContentService.MimeType.JSON);
-  }
-  return ContentService.createTextOutput(JSON.stringify(loadWatchlistAndQuotes())).setMimeType(ContentService.MimeType.JSON);
-}
-
-function doPost(e) {
-  var postData = JSON.parse(e.postData.contents);
-  var sheet = getWatchlistSheet();
-  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).clearContent();
-  for (var i = 0; i < postData.length; i++) {
-    sheet.appendRow([postData[i].id, postData[i].symbol, postData[i].name, postData[i].category, postData[i].note || ""]);
-  }
-  return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
-}
-</script>
-<!-- 👆 👆 👆 GAS 後端程式碼結束 👆 👆 👆 -->
-
 <!DOCTYPE html>
 <html lang="zh-TW" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>台股報價自選面板 Pro (即時升級版)</title>
+    <title>台股報價自選面板 Pro</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -302,8 +12,8 @@ function doPost(e) {
             theme: {
                 extend: {
                     colors: {
-                        upRed: '#ef4444',
-                        downGreen: '#22c55e',
+                        upRed: '#ef4444',     /* 台灣習慣：紅漲 */
+                        downGreen: '#22c55e', /* 台灣習慣：綠跌 */
                         darkBg: '#0f172a',
                         darkCard: '#1e293b',
                     }
@@ -311,12 +21,12 @@ function doPost(e) {
             }
         }
     </script>
-    
     <!-- UMD React & Babel -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script>
+        // 註冊自訂預設集，將 React JSX Runtime 強制指定為 classic
         Babel.registerPreset('custom-preset', {
             presets: [
                 [Babel.availablePresets['env'], { modules: false }],
@@ -324,21 +34,22 @@ function doPost(e) {
             ]
         });
     </script>
-    <!-- Lightweight Charts -->
+    <!-- Lightweight Charts (TradingView) -->
     <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
         @keyframes pulse-up {
-            0% { background-color: rgba(239, 68, 68, 0.3); transform: scale(1.02); }
-            100% { background-color: transparent; transform: scale(1); }
+            0% { background-color: rgba(239, 68, 68, 0.2); }
+            100% { background-color: transparent; }
         }
         @keyframes pulse-down {
-            0% { background-color: rgba(34, 197, 94, 0.3); transform: scale(1.02); }
-            100% { background-color: transparent; transform: scale(1); }
+            0% { background-color: rgba(34, 197, 94, 0.2); }
+            100% { background-color: transparent; }
         }
-        .flash-up { animation: pulse-up 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
-        .flash-down { animation: pulse-down 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
+        .flash-up { animation: pulse-up 0.8s ease-out; }
+        .flash-down { animation: pulse-down 0.8s ease-out; }
     </style>
 </head>
 <body class="bg-slate-50 dark:bg-darkBg text-slate-800 dark:text-slate-100 min-h-screen transition-colors duration-200">
@@ -361,17 +72,30 @@ function doPost(e) {
         const getTaiwanTimeParts = (unixTimestamp) => {
             const tzOffset = 8 * 60 * 60 * 1000;
             const date = new Date(unixTimestamp * 1000 + tzOffset);
-            return { hour: date.getUTCHours(), minute: date.getUTCMinutes() };
+            return {
+                hour: date.getUTCHours(),
+                minute: date.getUTCMinutes()
+            };
         };
 
         const formatVolume = (vol, isFutures) => {
             if (vol === null || vol === undefined || isNaN(Number(vol))) return "—";
             const num = Number(vol);
-            if (isFutures) return num >= 10000 ? (num / 10000).toFixed(3) + " 萬口" : num.toLocaleString() + " 口";
-            return num >= 1000000 ? (num / 1000).toFixed(0) + " 張" : num.toLocaleString() + " 股";
+            if (isFutures) {
+                if (num >= 10000) return (num / 10000).toFixed(3) + " 萬口";
+                return num.toLocaleString() + " 口";
+            } else {
+                if (num >= 1000000) return (num / 1000).toFixed(0) + " 張";
+                return num.toLocaleString() + " 股";
+            }
         };
 
-        const getDecimals = (sym) => (sym === "WTX&" ? 0 : 2);
+        const getDecimals = (sym) => {
+            if (sym === "WTX&") return 0;
+            if (sym === "^TWII") return 2;
+            if (sym === "^TWOII") return 2;
+            return 2;
+        };
 
         const Icons = {
             TrendingUp: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>,
@@ -384,17 +108,16 @@ function doPost(e) {
             Refresh: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M21 20v-5h-5.12" /></svg>
         };
 
-        const US_POPULAR_STOCKS = [
-            { sym: 'TSM', name: '台積電 ADR' },
-            { sym: 'NVDA', name: '輝達' },
-            { sym: 'AAPL', name: '蘋果' },
-            { sym: 'QQQ', name: '納斯達克100' },
-            { sym: 'SPY', name: '標普500' }
-        ];
-
         function App() {
             const [theme, setTheme] = useState('dark');
-            const [gasUrl, setGasUrl] = useState(() => localStorage.getItem('stockwatch_gas_url_v3') || 'https://script.google.com/macros/s/AKfycbzzBShEXcK4R_A76ojzZrm0GjrX1G9kItfcI9Z2oNByMTd_i6jVM6uKzwFrwaMgiIRE/exec');
+            
+            // 已綁定您最新提供的 API 網址
+            const [gasUrl, setGasUrl] = useState(() => {
+                const local = localStorage.getItem('stockwatch_gas_url_v4');
+                const defaultUrl = 'https://script.google.com/macros/s/AKfycbzxSD9zAnylmvH2DyxBB1AJL_7Jl3RI90UEinExB-G6oTncwPDvLUl_qS5IDoDXaPm0lA/exec';
+                return local || defaultUrl;
+            });
+
             const [cloudSyncEnabled, setCloudSyncEnabled] = useState(true);
             const [cloudConnected, setCloudConnected] = useState(false);
             const [syncLoading, setSyncLoading] = useState(false);
@@ -402,14 +125,13 @@ function doPost(e) {
             const [loadError, setLoadError] = useState(false);
             
             const [watchlist, setWatchlist] = useState(() => {
-                const local = localStorage.getItem('stockwatch_list_v3');
+                const local = localStorage.getItem('stockwatch_list_v4');
                 if (local) return JSON.parse(local);
                 return [
                     { id: "1", symbol: "2330", name: "台積電", category: "stock", note: "", quote: {} },
-                    { id: "2", symbol: "0050", name: "元大台灣50", category: "etf", note: "", quote: {} },
-                    { id: "3", symbol: "WTX&", name: "台指期近月", category: "stock", note: "", quote: {} },
-                    { id: "4", symbol: "TSM", name: "台積電 ADR", category: "us", note: "", quote: {} },
-                    { id: "5", symbol: "NVDA", name: "輝達", category: "us", note: "", quote: {} }
+                    { id: "2", symbol: "2317", name: "鴻海", category: "stock", note: "", quote: {} },
+                    { id: "5", symbol: "WTX&", name: "台指期近月", category: "stock", note: "", quote: {} },
+                    { id: "6", symbol: "TSM", name: "台積電 ADR", category: "us", note: "", quote: {} }
                 ];
             });
 
@@ -417,22 +139,25 @@ function doPost(e) {
             const [activeTab, setActiveTab] = useState("all");
             const [searchQuery, setSearchQuery] = useState("");
             const [chartType, setChartType] = useState("trend");
-            const [futuresSession, setFuturesSession] = useState("night"); 
+            const [futuresSession, setFuturesSession] = useState("night");
             
             const [showAddModal, setShowAddModal] = useState(false);
             const [newSymbol, setNewSymbol] = useState("");
             const [newCategory, setNewCategory] = useState("stock");
             const [newNamePreview, setNewNamePreview] = useState("");
-            
-            const [indexQuotes, setIndexQuotes] = useState({ twii: {}, twoii: {}, wtx: {} });
+            const [addError, setAddError] = useState("");
+
+            const [indexQuotes, setIndexQuotes] = useState({
+                twii: { price: null, change: null, changePercent: null },
+                twoii: { price: null, change: null, changePercent: null },
+                wtx: { price: null, change: null, changePercent: null }
+            });
+
             const [prevQuotesMap, setPrevQuotesMap] = useState({});
             const [flashStates, setFlashStates] = useState({});
             const [toastMsg, setToastMsg] = useState("");
             const [klineRange, setKlineRange] = useState("3M");
             
-            // 獨立的原始圖表資料狀態，讓切換日夜盤不需要重新發送 API 請求
-            const [rawChartData, setRawChartData] = useState([]);
-
             const chartContainerRef = useRef(null);
             const chartInstanceRef = useRef(null);
             const candlestickSeriesRef = useRef(null);
@@ -442,42 +167,60 @@ function doPost(e) {
                 setTimeout(() => setToastMsg(""), 3000);
             };
 
-            useEffect(() => localStorage.setItem('stockwatch_list_v3', JSON.stringify(watchlist)), [watchlist]);
-            useEffect(() => localStorage.setItem('stockwatch_gas_url_v3', gasUrl), [gasUrl]);
+            useEffect(() => {
+                localStorage.setItem('stockwatch_list_v4', JSON.stringify(watchlist));
+            }, [watchlist]);
+
+            useEffect(() => {
+                localStorage.setItem('stockwatch_gas_url_v4', gasUrl);
+                setCloudSyncEnabled(!!gasUrl);
+            }, [gasUrl]);
 
             const loadDataFromCloud = () => {
                 if (!gasUrl) return;
                 setSyncLoading(true);
-                // 強制加上時戳防止瀏覽器快取，實現真正的日盤跳動
-                const finalUrl = `${gasUrl}${gasUrl.includes('?') ? '&' : '?'}nocache=${Date.now()}`;
+                setLoadError(false);
+                
+                const cacheBuster = `_t=${Date.now()}`;
+                const finalUrl = gasUrl.includes('?') ? `${gasUrl}&${cacheBuster}` : `${gasUrl}?${cacheBuster}`;
 
-                fetch(finalUrl, { mode: "cors", cache: "no-store" })
-                    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+                fetch(finalUrl, { method: "GET", mode: "cors", cache: "no-store" })
+                    .then(res => res.ok ? res.json() : Promise.reject(res))
                     .then(data => {
                         if (data && data.status === "success") {
                             const nextFlash = {};
                             const nextQuotes = {};
                             data.watchlist.forEach(item => {
-                                if (!item.quote) return;
                                 const prev = prevQuotesMap[item.symbol];
-                                const current = Number(item.quote.price);
-                                if (prev && current && current !== prev) {
-                                    nextFlash[item.symbol] = current > prev ? 'up' : 'down';
+                                const current = item.quote ? item.quote.price : null;
+                                if (prev && current) {
+                                    if (current > prev) nextFlash[item.symbol] = 'up';
+                                    else if (current < prev) nextFlash[item.symbol] = 'down';
                                 }
-                                nextQuotes[item.symbol] = current;
+                                if (current) nextQuotes[item.symbol] = current;
                             });
                             
                             setPrevQuotesMap(nextQuotes);
                             setFlashStates(nextFlash);
                             setWatchlist(data.watchlist);
-                            if (data.indices) setIndexQuotes(data.indices);
+                            
+                            if (data.indices && data.indices.twii && data.indices.twii.price !== null) {
+                                setIndexQuotes(data.indices);
+                            }
                             
                             setCloudConnected(true);
                             setLoadError(false);
-                            setTimeout(() => setFlashStates({}), 1000);
-                        } else throw new Error();
+                            setTimeout(() => setFlashStates({}), 800);
+                        } else {
+                            setCloudConnected(false);
+                            setLoadError(true);
+                        }
                     })
-                    .catch(() => setLoadError(true))
+                    .catch(e => {
+                        setCloudConnected(false);
+                        setLoadError(true);
+                        console.warn("API 連線失敗", e);
+                    })
                     .finally(() => setSyncLoading(false));
             };
 
@@ -487,7 +230,28 @@ function doPost(e) {
                 return () => clearInterval(interval);
             }, [gasUrl]);
 
-            // 1. 負責初始化畫布與拉取原始資料 (rawChartData)
+            // 自動辨識名稱
+            const STOCK_REGISTRY = {
+                "2330": "台積電", "2317": "鴻海", "2454": "聯發科", 
+                "0050": "元大台灣50", "00878": "國泰永續高股息",
+                "TSM": "台積電 ADR", "NVDA": "輝達", "AAPL": "蘋果", "SPY": "標普500", "QQQ": "納指 ETF"
+            };
+
+            useEffect(() => {
+                const s = newSymbol.trim().toUpperCase();
+                if (s.length > 0) {
+                    if (STOCK_REGISTRY[s]) {
+                        setNewNamePreview(STOCK_REGISTRY[s]);
+                    } else {
+                        setNewNamePreview(`代號 (${s})`);
+                    }
+                } else {
+                    setNewNamePreview("");
+                }
+                setAddError("");
+            }, [newSymbol]);
+
+            // 歷史 K 線渲染
             useEffect(() => {
                 if (!chartContainerRef.current || !selectedSymbol) return;
 
@@ -495,95 +259,129 @@ function doPost(e) {
                 const chart = LightweightCharts.createChart(chartContainerRef.current, {
                     width: chartContainerRef.current.clientWidth,
                     height: 320,
-                    layout: { background: { color: 'transparent' }, textColor: isDark ? '#94a3b8' : '#475569' },
-                    grid: {
-                        vertLines: { color: isDark ? 'rgba(148, 163, 184, 0.05)' : 'rgba(71, 85, 105, 0.05)' },
-                        horzLines: { color: isDark ? 'rgba(148, 163, 184, 0.05)' : 'rgba(71, 85, 105, 0.05)' },
-                    },
+                    layout: { background: { color: isDark ? '#1e293b' : '#ffffff' }, textColor: isDark ? '#94a3b8' : '#475569' },
+                    grid: { vertLines: { color: isDark ? 'rgba(148,163,184,0.1)' : 'rgba(71,85,105,0.05)' }, horzLines: { color: isDark ? 'rgba(148,163,184,0.1)' : 'rgba(71,85,105,0.05)' } },
                     rightPriceScale: { borderColor: isDark ? '#475569' : '#cbd5e1' },
-                    timeScale: { borderColor: isDark ? '#475569' : '#cbd5e1', timeVisible: chartType === "trend" },
+                    timeScale: { borderColor: isDark ? '#475569' : '#cbd5e1', timeVisible: chartType === "trend", secondsVisible: false },
                 });
 
                 let series;
                 if (chartType === "trend") {
-                    const activeQuote = selectedSymbol === "^TWII" ? indexQuotes.twii : selectedSymbol === "WTX&" ? indexQuotes.wtx : (watchlist.find(x => x.symbol === selectedSymbol)?.quote || {});
+                    const activeQuote = selectedSymbol === "^TWII" ? indexQuotes.twii : selectedSymbol === "^TWOII" ? indexQuotes.twoii : selectedSymbol === "WTX&" ? indexQuotes.wtx : (watchlist.find(x => x.symbol === selectedSymbol)?.quote || {});
                     const isUp = activeQuote.change >= 0;
                     series = chart.addAreaSeries({
                         lineColor: isUp ? '#ef4444' : '#22c55e',
-                        topColor: isUp ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.3)',
-                        bottomColor: 'rgba(0, 0, 0, 0)',
+                        topColor: isUp ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)',
+                        bottomColor: 'rgba(0,0,0,0)',
                         lineWidth: 2,
                     });
                 } else {
                     series = chart.addCandlestickSeries({
-                        upColor: '#ef4444', downColor: '#22c55e',
-                        borderUpColor: '#ef4444', borderDownColor: '#22c55e',
-                        wickUpColor: '#ef4444', wickDownColor: '#22c55e',
+                        upColor: '#ef4444', downColor: '#22c55e', borderUpColor: '#ef4444', borderDownColor: '#22c55e', wickUpColor: '#ef4444', wickDownColor: '#22c55e',
                     });
                 }
 
-                chartInstanceRef.current = chart;
-                candlestickSeriesRef.current = series;
-
                 setChartLoading(true);
                 const apiRange = chartType === "trend" ? "1d" : klineRange.toLowerCase();
-                const finalChartUrl = `${gasUrl}?action=getChart&symbol=${selectedSymbol}&range=${apiRange}&nocache=${Date.now()}`;
+                const cacheBuster = `_t=${Date.now()}`;
+                const finalChartUrl = `${gasUrl}${gasUrl.includes('?')?'&':'?'}action=getChart&symbol=${selectedSymbol}&range=${apiRange}&${cacheBuster}`;
 
                 fetch(finalChartUrl, { cache: "no-store" })
                     .then(res => res.json())
                     .then(data => {
-                        if (data && data.candles) {
-                            setRawChartData(data.candles);
+                        if (data && data.candles && data.candles.length > 0) {
+                            let chartData = data.candles;
+                            if (selectedSymbol === "WTX&" && chartType === "trend") {
+                                chartData = chartData.filter(candle => {
+                                    const { hour, minute } = getTaiwanTimeParts(candle.time);
+                                    const timeVal = hour * 100 + minute;
+                                    return futuresSession === "day" ? (timeVal >= 845 && timeVal <= 1345) : (timeVal >= 1500 || timeVal <= 500);
+                                });
+                            }
+                            
+                            if (chartType === "trend") {
+                                series.setData(chartData.map(c => ({ time: c.time, value: c.value !== undefined ? c.value : c.close })));
+                            } else {
+                                series.setData(chartData);
+                            }
+                            chart.timeScale().fitContent();
                         }
                     })
+                    .catch(err => console.warn("圖表資料載入失敗", err))
                     .finally(() => setChartLoading(false));
 
-                const handleResize = () => chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+                chartInstanceRef.current = chart;
+                candlestickSeriesRef.current = series;
+
+                const handleResize = () => chart && chartContainerRef.current && chart.applyOptions({ width: chartContainerRef.current.clientWidth });
                 window.addEventListener('resize', handleResize);
 
                 return () => {
                     window.removeEventListener('resize', handleResize);
                     chart.remove();
                 };
-            }, [selectedSymbol, theme, klineRange, gasUrl, chartType]);
-
-            // 2. 負責根據 futuresSession (日/夜盤) 過濾並填入圖表
-            useEffect(() => {
-                if (!rawChartData || rawChartData.length === 0 || !candlestickSeriesRef.current) return;
-                
-                let chartData = [...rawChartData];
-                
-                // 台指電子盤切換過濾邏輯
-                if (selectedSymbol === "WTX&" && chartType === "trend") {
-                    chartData = chartData.filter(candle => {
-                        const { hour, minute } = getTaiwanTimeParts(candle.time);
-                        const timeVal = hour * 100 + minute;
-                        if (futuresSession === "day") {
-                            return timeVal >= 845 && timeVal <= 1345;
-                        } else {
-                            // 夜盤: 15:00 ~ 次日 05:00
-                            return timeVal >= 1500 || timeVal <= 500;
-                        }
-                    });
-                }
-
-                if (chartType === "trend") {
-                    candlestickSeriesRef.current.setData(chartData.map(c => ({ time: c.time, value: c.value !== undefined ? c.value : c.close })));
-                } else {
-                    candlestickSeriesRef.current.setData(chartData);
-                }
-                chartInstanceRef.current.timeScale().fitContent();
-            }, [rawChartData, futuresSession, chartType, selectedSymbol]);
+            }, [selectedSymbol, theme, klineRange, gasUrl, chartType, futuresSession]);
 
             const toggleTheme = () => {
-                const next = theme === 'dark' ? 'light' : 'dark';
-                setTheme(next);
-                document.documentElement.classList.toggle('dark', next === 'dark');
+                const nextTheme = theme === 'dark' ? 'light' : 'dark';
+                setTheme(nextTheme);
+                document.documentElement.classList.toggle('dark', nextTheme === 'dark');
             };
+
+            // 【關鍵修正】：使用 text/plain 繞過 CORS 預檢，確保資料能寫入 Google Sheet
+            const syncToCloud = (currentList) => {
+                if (!gasUrl.trim()) return;
+                setSyncLoading(true);
+                fetch(gasUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "text/plain;charset=utf-8" },
+                    body: JSON.stringify(currentList)
+                })
+                .then(() => {
+                    triggerToast("☁️ 資料已成功即時同步至雲端試算表");
+                    setTimeout(loadDataFromCloud, 1500);
+                })
+                .catch(e => console.error("雲端同步錯誤", e))
+                .finally(() => setSyncLoading(false));
+            };
+
+            const handleAddStockSubmit = () => {
+                const sym = newSymbol.trim().toUpperCase();
+                if (!sym) return setAddError("請輸入代號");
+                if (watchlist.some(item => item.symbol.toUpperCase() === sym)) return setAddError("該代號已在觀察名單中");
+
+                const finalName = newNamePreview || `自訂(${sym})`;
+                const nextList = [...watchlist, {
+                    id: Date.now().toString(), symbol: sym, name: finalName, category: newCategory, note: "", quote: {}
+                }];
+
+                setWatchlist(nextList);
+                setSelectedSymbol(sym);
+                setNewSymbol("");
+                setNewNamePreview("");
+                setShowAddModal(false);
+                triggerToast(`已成功新增觀察：${sym}`);
+
+                if (cloudSyncEnabled) syncToCloud(nextList);
+            };
+
+            const handleDeleteStock = (id, symbol, e) => {
+                e.stopPropagation();
+                const filtered = watchlist.filter(item => item.id !== id);
+                setWatchlist(filtered);
+                triggerToast(`已將 ${symbol} 自觀察清單移除`);
+                
+                if (selectedSymbol === symbol) setSelectedSymbol(filtered.length > 0 ? filtered[0].symbol : null);
+                if (cloudSyncEnabled) syncToCloud(filtered);
+            };
+
+            const handleNoteChange = (symbol, text) => setWatchlist(prev => prev.map(item => item.symbol === symbol ? { ...item, note: text } : item));
+            const handleNoteBlur = () => { triggerToast("筆記已存檔"); if (cloudSyncEnabled) syncToCloud(watchlist); };
 
             const filteredWatchlist = useMemo(() => {
                 return watchlist.filter(item => {
-                    if (!item.symbol.toUpperCase().includes(searchQuery.toUpperCase()) && !item.name.includes(searchQuery)) return false;
+                    const matchesSearch = item.symbol.toUpperCase().includes(searchQuery.toUpperCase()) || item.name.includes(searchQuery);
+                    if (!matchesSearch) return false;
                     if (activeTab === "stock") return item.category === "stock";
                     if (activeTab === "etf") return item.category === "etf";
                     if (activeTab === "us") return item.category === "us";
@@ -598,45 +396,38 @@ function doPost(e) {
                 return watchlist.find(item => item.symbol === selectedSymbol);
             }, [selectedSymbol, watchlist, indexQuotes]);
 
-            const selectedQuote = activeStockInfo?.quote;
-
-            const handleQuickAdd = (sym, name) => {
-                setNewSymbol(sym);
-                setNewNamePreview(name);
-                setNewCategory('us');
-            };
+            const selectedQuote = activeStockInfo?.quote || null;
 
             return (
-                <div className="flex flex-col h-screen min-h-0 bg-slate-50 dark:bg-darkBg overflow-hidden font-sans">
-                    {/* 頂部導覽列 */}
+                <div className="flex flex-col h-screen min-h-0 bg-slate-50 dark:bg-darkBg overflow-hidden">
+                    
+                    {/* Header */}
                     <header className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm shrink-0">
                         <div className="flex items-center space-x-3">
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-lg shadow-md"><Icons.TrendingUp /></div>
+                            <div className="bg-upRed text-white p-1.5 rounded-lg"><Icons.TrendingUp /></div>
                             <div>
                                 <h1 className="text-xl font-bold tracking-tight text-slate-800 dark:text-white">台股報價自選面板 Pro</h1>
-                                <p className="text-xs text-slate-500 dark:text-slate-400 font-semibold">Yahoo API 快取穿透 • 台指電子盤</p>
+                                <p className="text-xs text-slate-500">Yahoo API 實時對接 • Google 雲端同步</p>
                             </div>
                         </div>
-                        <div className="flex items-center space-x-2 md:space-x-3">
-                            <button onClick={loadDataFromCloud} className={`p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition ${syncLoading?'animate-spin text-indigo-500':''}`} title="強制更新"><Icons.Refresh /></button>
+                        <div className="flex items-center space-x-3">
+                            <button onClick={loadDataFromCloud} className={`p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition ${syncLoading ? 'opacity-50' : ''}`} title="強制刷新"><Icons.Refresh /></button>
                             <button onClick={toggleTheme} className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition" title="切換主題">{theme === 'dark' ? <Icons.Sun /> : <Icons.Moon />}</button>
-                            <button onClick={() => setShowAddModal(true)} className="flex items-center space-x-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md transition">
-                                <Icons.Plus /><span>新增標的</span>
-                            </button>
+                            <button onClick={() => setShowAddModal(true)} className="flex items-center space-x-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md transition"><Icons.Plus /><span>新增標的</span></button>
                         </div>
                     </header>
 
-                    {/* 大盤走勢橫幅 */}
-                    <div className="flex items-center space-x-4 md:space-x-8 px-6 py-2.5 bg-slate-100 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-xs shrink-0 overflow-x-auto no-scrollbar">
-                        {['twii', 'twoii', 'wtx'].map((idxType, i) => {
-                            const q = indexQuotes[idxType];
-                            const name = idxType === 'twii' ? '加權指數' : idxType === 'twoii' ? '櫃買指數' : '台指電子盤';
+                    {/* 指數跑馬燈 */}
+                    <div className="flex items-center justify-center space-x-8 px-6 py-2.5 bg-slate-100 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-xs shrink-0 overflow-x-auto no-scrollbar">
+                        {['twii', 'twoii', 'wtx'].map((idxKey, i) => {
+                            const q = indexQuotes[idxKey];
+                            const name = idxKey === 'twii' ? '加權指數' : idxKey === 'twoii' ? '櫃買指數' : '台指電子盤';
                             return (
-                                <React.Fragment key={idxType}>
-                                    <div className="flex items-center space-x-2 shrink-0 cursor-pointer" onClick={() => { setSelectedSymbol(idxType === 'wtx' ? 'WTX&' : `^${idxType.toUpperCase()}`); setChartType('trend'); }}>
-                                        <span className="font-bold text-slate-500 dark:text-slate-400">{name}:</span>
-                                        <span className="font-black text-slate-800 dark:text-slate-100 font-mono">{q.price ? q.price.toLocaleString() : "..."}</span>
-                                        {q.change !== undefined && (
+                                <React.Fragment key={idxKey}>
+                                    <div className="flex items-center space-x-2 shrink-0">
+                                        <span className="font-bold text-slate-500">{name}:</span>
+                                        <span className="font-black font-mono">{q.price ? q.price.toLocaleString(undefined, {maximumFractionDigits:2}) : "連線中..."}</span>
+                                        {q.price && (
                                             <span className={`font-bold font-mono ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
                                                 {q.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(q.change))}
                                             </span>
@@ -644,51 +435,53 @@ function doPost(e) {
                                     </div>
                                     {i < 2 && <div className="w-[1px] h-3 bg-slate-300 dark:bg-slate-700 shrink-0"></div>}
                                 </React.Fragment>
-                            )
+                            );
                         })}
                     </div>
 
                     <main className="flex flex-col lg:flex-row flex-1 min-h-0">
-                        {/* 左側自選列表 */}
+                        {/* 左側：自選清單 */}
                         <section className="w-full lg:w-[420px] border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col min-h-0">
                             <div className="p-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
                                 <div className="relative">
                                     <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400"><Icons.Search /></span>
-                                    <input type="text" placeholder="搜尋代號或名稱..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 bg-transparent" />
+                                    <input type="text" placeholder="搜尋代號、名稱..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-800 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                                 </div>
                             </div>
-
                             <div className="flex border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 p-1.5 shrink-0">
-                                {[{id:'all', label:'全部'}, {id:'stock', label:'個股'}, {id:'etf', label:'ETF'}, {id:'us', label:'美股&ADR'}].map(tab => (
-                                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition ${activeTab === tab.id ? "bg-white dark:bg-slate-800 text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"}`}>
-                                        {tab.label}
+                                {['all', 'stock', 'etf', 'us'].map(tab => (
+                                    <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 py-2 text-xs font-semibold rounded-md transition ${activeTab === tab ? "bg-white dark:bg-slate-800 text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"}`}>
+                                        {tab === 'all' ? '全部' : tab === 'stock' ? '個股' : tab === 'etf' ? 'ETF' : '美股'}
                                     </button>
                                 ))}
                             </div>
-
                             <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 no-scrollbar">
                                 {filteredWatchlist.map(item => {
                                     const q = item.quote || {};
                                     const isActive = item.symbol === selectedSymbol;
-                                    const flash = flashStates[item.symbol];
-                                    const flashClass = flash === 'up' ? 'flash-up' : flash === 'down' ? 'flash-down' : '';
+                                    const flashClass = flashStates[item.symbol] === 'up' ? 'flash-up' : flashStates[item.symbol] === 'down' ? 'flash-down' : '';
 
                                     return (
-                                        <div key={item.id} onClick={() => setSelectedSymbol(item.symbol)} className={`group flex items-center justify-between p-4 cursor-pointer transition ${isActive ? 'bg-indigo-50/60 dark:bg-slate-800/80 border-l-4 border-indigo-500' : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'} ${flashClass}`}>
+                                        <div key={item.id} onClick={() => setSelectedSymbol(item.symbol)} className={`group flex items-center justify-between p-4 cursor-pointer transition ${isActive ? 'bg-indigo-50/60 dark:bg-slate-800/80 border-l-4 border-indigo-600' : 'hover:bg-slate-50 dark:hover:bg-slate-800/30'} ${flashClass}`}>
                                             <div>
-                                                <div className="flex items-center space-x-2">
-                                                    <span className="font-bold text-sm tracking-wide text-slate-800 dark:text-white">{item.symbol}</span>
-                                                    <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${item.category === "us" ? "bg-blue-100 dark:bg-blue-900/40 text-blue-600" : "bg-slate-100 dark:bg-slate-700 text-slate-500"}`}>{item.category.toUpperCase()}</span>
+                                                <div className="flex items-center space-x-1.5">
+                                                    <span className="font-bold text-sm tracking-wide">{item.symbol}</span>
+                                                    <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${item.category === "etf" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50" : item.category === "us" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40" : "bg-red-100 text-red-700 dark:bg-red-900/40"}`}>
+                                                        {item.category.toUpperCase()}
+                                                    </span>
                                                 </div>
-                                                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{item.name}</div>
+                                                <div className="text-xs text-slate-500 truncate mt-0.5 max-w-[150px]">{item.name}</div>
                                             </div>
-                                            <div className="text-right">
-                                                <div className="text-sm font-extrabold font-mono">{safeToFixed(q.price)}</div>
-                                                {q.change !== undefined && (
-                                                    <div className={`text-xs font-bold font-mono ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                        {q.change >= 0 ? '+' : ''}{safeToFixed(q.change)} ({safePercent(q.changePercent)})
-                                                    </div>
-                                                )}
+                                            <div className="flex items-center space-x-4">
+                                                <div className="text-right">
+                                                    <div className="text-sm font-extrabold font-mono">{safeToFixed(q.price)}</div>
+                                                    {q.price && (
+                                                        <div className={`text-xs font-bold flex items-center justify-end space-x-1 ${q.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                            <span>{q.change >= 0 ? '+' : ''}{safeToFixed(q.change)}</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button onClick={(e) => handleDeleteStock(item.id, item.symbol, e)} className="p-1.5 rounded-md hover:bg-red-50 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition"><Icons.Trash /></button>
                                             </div>
                                         </div>
                                     );
@@ -696,102 +489,110 @@ function doPost(e) {
                             </div>
                         </section>
 
-                        {}
+                        {/* 右側：圖表與詳情 */}
                         <section className="flex-1 bg-slate-50 dark:bg-slate-900/30 flex flex-col min-h-0 overflow-y-auto p-4 md:p-6 space-y-6">
-                            {activeStockInfo && selectedQuote ? (
+                            {selectedSymbol && activeStockInfo && (
                                 <>
-                                    {/* 指標與控制列 */}
-                                    <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 shadow-sm border border-slate-100 dark:border-slate-800">
-                                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-100 dark:border-slate-700/60 pb-4 mb-4">
-                                            <div>
-                                                <h2 className="text-2xl font-black text-slate-800 dark:text-white flex items-center space-x-3">
-                                                    <span>{activeStockInfo.name}</span>
-                                                    <span className="text-lg text-slate-400 font-semibold tracking-wider">{activeStockInfo.symbol}</span>
-                                                </h2>
-                                                <div className="flex items-baseline space-x-3 mt-1">
-                                                    <span className="text-3xl font-mono font-black">{safeToFixed(selectedQuote.price, getDecimals(selectedSymbol))}</span>
-                                                    <span className={`text-lg font-bold font-mono ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
-                                                        {selectedQuote.change >= 0 ? '▲' : '▼'}{safeToFixed(Math.abs(selectedQuote.change), getDecimals(selectedSymbol))} ({safePercent(selectedQuote.changePercent)})
-                                                    </span>
+                                    {/* 標題與即時報價卡片 (個股/ETF/美股) */}
+                                    {!(selectedSymbol === "^TWII" || selectedSymbol === "^TWOII" || selectedSymbol === "WTX&") && (
+                                        <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h2 className="text-xl font-black text-slate-800 dark:text-white flex items-center space-x-2">
+                                                        <span>{selectedSymbol}</span>
+                                                        <span className="text-sm text-slate-500 font-semibold">{activeStockInfo.name}</span>
+                                                    </h2>
                                                 </div>
+                                                <div className="flex items-baseline space-x-4">
+                                                    <div className="text-3xl font-black font-mono tracking-tight">{safeToFixed(selectedQuote?.price)}</div>
+                                                    {selectedQuote?.price && (
+                                                        <div className={`text-base font-bold flex items-center ${selectedQuote.change >= 0 ? 'text-upRed' : 'text-downGreen'}`}>
+                                                            <span className="mr-1">{selectedQuote.change >= 0 ? '▲' : '▼'}</span>
+                                                            <span>{safeToFixed(Math.abs(selectedQuote.change))} ({safePercent(selectedQuote.changePercent)})</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-4 mt-6 pt-6 border-t border-slate-100 dark:border-slate-700/60">
+                                                <div><p className="text-[10px] text-slate-400">開盤</p><p className="font-mono font-bold mt-1">{safeToFixed(selectedQuote?.open)}</p></div>
+                                                <div><p className="text-[10px] text-slate-400">最高</p><p className="font-mono font-bold mt-1 text-upRed">{safeToFixed(selectedQuote?.high)}</p></div>
+                                                <div><p className="text-[10px] text-slate-400">最低</p><p className="font-mono font-bold mt-1 text-downGreen">{safeToFixed(selectedQuote?.low)}</p></div>
+                                                <div><p className="text-[10px] text-slate-400">成交量</p><p className="font-mono font-bold mt-1">{formatVolume(selectedQuote?.volume, false)}</p></div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* 圖表區塊 */}
+                                    <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-slate-100 dark:border-slate-800">
+                                        <div className="flex items-center justify-between mb-4">
+                                            <div className="flex space-x-6 text-sm font-bold">
+                                                <button onClick={() => setChartType("trend")} className={`pb-2 border-b-2 ${chartType === "trend" ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400'}`}>走勢</button>
+                                                <button onClick={() => setChartType("kline")} className={`pb-2 border-b-2 ${chartType === "kline" ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400'}`}>K線</button>
                                             </div>
                                             
-                                            {/* 切換工具列 */}
-                                            <div className="flex flex-col items-end space-y-2">
-                                                {selectedSymbol === "WTX&" && chartType === "trend" && (
-                                                    <div className="flex bg-indigo-50 dark:bg-slate-900 p-1 rounded-lg border border-indigo-100 dark:border-slate-700 shadow-inner">
-                                                        <button onClick={() => setFuturesSession("day")} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${futuresSession === "day" ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>☀️ 日盤 (08:45-13:45)</button>
-                                                        <button onClick={() => setFuturesSession("night")} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${futuresSession === "night" ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>🌙 夜盤 (15:00-05:00)</button>
-                                                    </div>
-                                                )}
-                                                <div className="flex space-x-4 text-sm font-bold bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
-                                                    <button onClick={() => setChartType("trend")} className={`px-4 py-1.5 rounded-md transition ${chartType === "trend" ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-emerald-400 shadow-sm' : 'text-slate-500'}`}>分時走勢</button>
-                                                    <button onClick={() => setChartType("kline")} className={`px-4 py-1.5 rounded-md transition ${chartType === "kline" ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-emerald-400 shadow-sm' : 'text-slate-500'}`}>日 K 線</button>
+                                            {/* 日夜盤切換按鈕 (台指期專用) */}
+                                            {selectedSymbol === "WTX&" && chartType === "trend" && (
+                                                <div className="flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                                                    <button onClick={() => setFuturesSession("day")} className={`px-3 py-1 text-xs font-bold rounded-md ${futuresSession === "day" ? 'bg-indigo-600 text-white' : 'text-slate-400'}`}>日盤</button>
+                                                    <button onClick={() => setFuturesSession("night")} className={`px-3 py-1 text-xs font-bold rounded-md ${futuresSession === "night" ? 'bg-indigo-600 text-white' : 'text-slate-400'}`}>夜盤</button>
                                                 </div>
-                                            </div>
+                                            )}
                                         </div>
-
-                                        <div className="relative">
-                                            {chartLoading && <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/50 dark:bg-slate-800/50 backdrop-blur-sm rounded-xl"><span className="text-indigo-600 font-bold animate-pulse">載入圖表中...</span></div>}
-                                            <div ref={chartContainerRef} className="w-full h-[360px] rounded-xl overflow-hidden" />
-                                        </div>
+                                        <div ref={chartContainerRef} className="w-full h-[320px] bg-white dark:bg-slate-800 rounded-xl" />
                                     </div>
                                 </>
-                            ) : (
-                                <div className="flex-1 flex items-center justify-center text-slate-400 font-bold">請選擇左側清單標的</div>
                             )}
                         </section>
                     </main>
 
-                    {}
+                    {/* 新增標的 Modal */}
                     {showAddModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4">
-                            <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl shadow-2xl p-6">
-                                <div className="flex justify-between mb-4 border-b border-slate-100 dark:border-slate-700 pb-2">
-                                    <h3 className="font-bold text-lg text-slate-800 dark:text-white">新增自選標的</h3>
-                                    <button onClick={() => setShowAddModal(false)} className="text-slate-400">✕</button>
+                            <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl">
+                                <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-700">
+                                    <h3 className="font-bold text-slate-800 dark:text-white">新增自選觀察標的</h3>
+                                    <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
                                 </div>
-                                <div className="space-y-4">
+                                <div className="py-4 space-y-4">
                                     <div>
-                                        <label className="text-xs font-bold text-slate-500">輸入代號</label>
-                                        <input type="text" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value.toUpperCase())} placeholder="例: 2330, TSM, AAPL" className="w-full px-4 py-2 mt-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-indigo-500" />
-                                    </div>
-                                    <div>
-                                        <label className="text-xs font-bold text-slate-500">市場分類</label>
-                                        <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="w-full px-4 py-2 mt-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-indigo-500">
-                                            <option value="stock">台股個股</option>
-                                            <option value="etf">ETF 基金</option>
-                                            <option value="us">美股 & ADR</option>
-                                        </select>
+                                        <label className="text-xs font-bold text-slate-500 mb-1 block">股票或 ETF 代號</label>
+                                        <input type="text" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} placeholder="例如: 2330, TSM, QQQ" className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm" />
                                     </div>
                                     
-                                    {/* 美股快捷加入區塊 */}
-                                    <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-100 dark:border-blue-900/50">
-                                        <span className="text-xs font-bold text-blue-600 dark:text-blue-400 block mb-2">🔥 熱門國際標的快速加入：</span>
+                                    {/* 🔥 快速加入按鈕 */}
+                                    <div className="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
+                                        <label className="text-xs font-bold text-slate-500 mb-2 block">🔥 快速加入熱門標的</label>
                                         <div className="flex flex-wrap gap-2">
-                                            {US_POPULAR_STOCKS.map(s => (
-                                                <button key={s.sym} onClick={() => handleQuickAdd(s.sym, s.name)} className="px-2 py-1 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold rounded shadow-sm border border-slate-200 dark:border-slate-700 hover:bg-indigo-50 hover:text-indigo-600 transition">
-                                                    {s.sym}
-                                                </button>
-                                            ))}
+                                            <button onClick={() => { setNewSymbol("TSM"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">TSM (台積電ADR)</button>
+                                            <button onClick={() => { setNewSymbol("NVDA"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">NVDA (輝達)</button>
+                                            <button onClick={() => { setNewSymbol("AAPL"); setNewCategory("us"); }} className="px-2 py-1 text-xs font-bold bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200">AAPL (蘋果)</button>
+                                            <button onClick={() => { setNewSymbol("QQQ"); setNewCategory("etf"); }} className="px-2 py-1 text-xs font-bold bg-indigo-100 text-indigo-700 rounded-md hover:bg-indigo-200">QQQ (納指 ETF)</button>
+                                            <button onClick={() => { setNewSymbol("SPY"); setNewCategory("etf"); }} className="px-2 py-1 text-xs font-bold bg-indigo-100 text-indigo-700 rounded-md hover:bg-indigo-200">SPY (標普 ETF)</button>
                                         </div>
                                     </div>
-                                    
-                                    <button onClick={() => {
-                                        if(!newSymbol) return;
-                                        setWatchlist([...watchlist, { id: Date.now().toString(), symbol: newSymbol, name: newNamePreview || newSymbol, category: newCategory, quote: {} }]);
-                                        setShowAddModal(false);
-                                        triggerToast(`已加入標的: ${newSymbol}`);
-                                        setNewSymbol("");
-                                    }} className="w-full py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition">確定新增</button>
+
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 mb-1 block">商品分類</label>
+                                        <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm">
+                                            <option value="stock">一般個股 (Stock)</option>
+                                            <option value="etf">指數型/高股息 (ETF)</option>
+                                            <option value="us">美股熱門 & ADR</option>
+                                        </select>
+                                    </div>
+                                    {addError && <div className="text-xs text-red-500 font-bold">{addError}</div>}
+                                </div>
+                                <div className="pt-4 flex space-x-3">
+                                    <button onClick={() => setShowAddModal(false)} className="flex-1 py-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 font-bold rounded-xl text-sm transition">取消</button>
+                                    <button onClick={handleAddStockSubmit} className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-sm transition">確定加入</button>
                                 </div>
                             </div>
                         </div>
                     )}
-                    
+
+                    {/* Toast 提示 */}
                     {toastMsg && (
-                        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl font-bold text-sm flex items-center space-x-2 animate-bounce">
-                            <span>💡</span><span>{toastMsg}</span>
+                        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center space-x-2 animate-bounce">
+                            <span>💡</span><span className="text-xs font-bold">{toastMsg}</span>
                         </div>
                     )}
                 </div>
